@@ -4,16 +4,82 @@ A [SoundBase](https://soundbase.app) plugin that turns a Signal Hound **SA44B**
 USB spectrum analyzer (and its siblings, the SA44, SA124A and SA124B) into a
 live spectrum source for RF coordination.
 
-> **Windows only.** Signal Hound ships the SA-series API (`sa_api.dll`) for
-> Windows x64 and nothing else; the company has said repeatedly that the
-> SA44/SA124 are Windows-only and that the old Linux and ARM builds are
-> unsupported. There is no macOS library and no published USB protocol, so
-> this plugin cannot drive the hardware on a Mac. It declares `win32-x64` in
-> its manifest and SoundBase Desktop will refuse to install it anywhere else.
-> On a Mac the whole plugin still *runs* in mock mode (below), which is how
-> it is developed and tested.
+> **About macOS.** Signal Hound ships the SA-series API for Windows only and
+> has said repeatedly that the SA44/SA124 are Windows-only. This plugin runs
+> natively on Windows, and on **Apple Silicon Macs** it runs Signal Hound's
+> obsolete x86-64 **Linux** build of the same API inside a small Linux VM,
+> bridging its USB traffic back to the Mac. That path is real and works —
+> the sections below describe both.
 
-## Requirements on the Windows machine
+## macOS (Apple Silicon)
+
+There is no macOS SA API, no published USB protocol and no open-source
+driver, so the only code that can drive an SA44B on a Mac is the x86-64 Linux
+`libsa_api.so.3.0.11` that Signal Hound still ships (marked obsolete) inside
+their SDK zip. This plugin runs it like this:
+
+```
+SoundBase Desktop ── plugin (Node, arm64) ── limactl shell ──▶ Lima VM "sa44b" (arm64 Ubuntu)
+                           │                                     └─ /amd64 chroot (x86-64, Rosetta)
+                           │                                          sa44b-worker ─ libsa_api.so ─ shim libftd2xx.so
+                           │                                                                              │ D2XX calls over TCP
+                           └─ ftdi-bridge (macOS, libusb) ◀── ssh reverse tunnel, 127.0.0.1:7788 ─────────┘
+                                   │
+                              SA44B (FT2232H, both ports)
+```
+
+- `driver/bridge/ftdi-bridge.c` holds the SA44B's two FTDI ports through
+  libusb (no root, no kernel extension; it coexists with Apple's FTDI driver)
+  and serves the thirteen D2XX calls the library uses, with D2XX semantics
+  (blocking reads with timeouts, queue status, port cycling).
+- `driver/shim/ftd2xx-shim.c` is an x86-64 `libftd2xx.so` that forwards
+  every call to the bridge.
+- `driver/mac-host.js` starts the bridge, the VM, the chroot mounts and the
+  tunnel when a device is opened, and launches the worker inside the VM.
+
+### Setup (once)
+
+```sh
+brew install lima libftdi
+npm install
+scripts/vm/provision.sh
+```
+
+`provision.sh` builds the bridge, downloads Signal Hound's SDK zip (about
+160 MB; cached) and extracts the Linux library from it, creates the Lima VM
+with Rosetta, builds an x86-64 Ubuntu chroot inside it, and compiles the shim
+and the worker there. It takes a few minutes the first time and is safe to
+re-run. The library is not part of this repository; Signal Hound's API
+licence governs it and it is fetched for use with your own device.
+
+Then `npm start`, or point SoundBase Desktop at the folder:
+
+```sh
+SB_PLUGIN_DIRS="$HOME/Documents" open -a "SoundBase Desktop"
+```
+
+What to expect: discovery lists the unit by serial within a second (the
+bridge enumerates it directly). The first open after a VM boot takes about
+10 s (5–6 s of that is the library's own open sequence, which cycles the USB
+port once). A 146 MHz UHF span at 10 kHz RBW sweeps in about 1.4 s. The
+library pulls the unit's calibration files from the device's flash on first
+open, so no internet access is needed.
+
+Measured on this path with an SA44B (firmware 2.12): stable UHF sweeps with
+repeatable peaks across consecutive sweeps, 76 650 device bins resampled to
+451 points.
+
+Caveats:
+
+- Signal Hound warns that their non-Windows FTDI paths can lose data on slow
+  systems; the bridge buffers up to 32 MB per port and has not dropped data
+  in testing, but this is an unsupported library on an unsupported OS.
+- Only Apple Silicon: Rosetta for Linux is what runs the x86-64 library at
+  native speed. An Intel Mac would need an x86-64 Linux VM instead.
+- Quitting SoundBase leaves the Lima VM running (`limactl stop sa44b` to stop
+  it). The bridge and tunnel are children of the plugin and go away with it.
+
+## Windows
 
 1. **SoundBase Desktop** for Windows.
 2. **Spike**, Signal Hound's own software, installed from
@@ -72,6 +138,9 @@ driver/
   worker/sa44b-worker.c    the only code that touches sa_api.dll
   worker/bin/<target>/     built workers (win32-x64 is committed; host builds
                            are made locally)
+  bridge/                  macOS: FTDI D2XX over TCP, on libusb
+  shim/                    Linux: libftd2xx.so that forwards to the bridge
+  mac-host.js              macOS: VM, bridge, tunnel and worker launch
 scripts/build-worker.sh    builds the worker for the host and, with mingw-w64
                            installed, for Windows
 __tests__/                 contract tests through the real shell, in mock mode

@@ -52,11 +52,15 @@ export class WorkerClient {
    * @param {string}  [options.sdkDir]   folder holding sa_api.dll + ftd2xx.dll
    * @param {string}  [options.binary]   explicit worker path (tests)
    * @param {string[]} [options.args]    arguments placed before the worker's own (tests)
+   * @param {{command: string, args: string[]}} [options.spec]
+   *        a complete launch command (used on macOS, where the worker runs
+   *        inside the Linux VM); when given, binary/args/--sdk are not used
    * @param {(msg: string) => void} [options.log]
    */
-  constructor({ mock = mockRequested(), sdkDir, binary, args = [], log } = {}) {
+  constructor({ mock = mockRequested(), sdkDir, binary, args = [], spec, log } = {}) {
     this.mock = mock;
     this.sdkDir = sdkDir;
+    this.spec = spec ?? null;
     this.binary = binary ?? workerBinaryPath();
     this.extraArgs = args;
     this.log = log ?? (() => {});
@@ -75,6 +79,14 @@ export class WorkerClient {
 
   start() {
     if (this.child) return;
+    if (this.spec) {
+      this.child = spawn(this.spec.command, this.spec.args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env },
+      });
+      this.wire();
+      return;
+    }
     if (!this.binary) {
       throw new WorkerError(
         `no sa44b-worker binary for ${process.platform}-${process.arch}; ` +
@@ -90,6 +102,10 @@ export class WorkerClient {
       windowsHide: true,
       env: { ...process.env, SB_SA44B_MOCK: this.mock ? '1' : '' },
     });
+    this.wire();
+  }
+
+  wire() {
     this.child.on('error', (err) => this.die(err));
     // a write to a worker that just died surfaces here, not in the write
     // callback; without a listener it is an uncaught exception

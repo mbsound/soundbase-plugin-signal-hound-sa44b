@@ -102,7 +102,7 @@ test('the manifest is valid and the handshake reports a real port', () => {
   assert.equal(handle.manifest.id, manifest.id);
   assert.ok(handle.port > 0);
   assert.equal(HANDSHAKE_PREFIX, 'SB_PLUGIN_READY ');
-  assert.deepEqual(manifest.platforms, ['win32-x64']);
+  assert.deepEqual(manifest.platforms, ['darwin-arm64', 'win32-x64']);
 });
 
 test('the product the adapter announces is declared in the manifest', () => {
@@ -349,4 +349,21 @@ test('a worker that dies mid-sweep marks the device failed, not healthy', async 
     await delay(50);
   }
   assert.equal(status, 'failed', 'onFatal turns a dead worker into a device SoundBase reports as broken');
+});
+
+// ---------------------------------------------------------------------------
+// the macOS host: serials from the bridge's FTDI port listing
+// ---------------------------------------------------------------------------
+
+test('SA serial numbers come from FTDI port A of each Signal Hound', async () => {
+  const { saSerialsFromPorts } = await import('../driver/mac-host.js');
+  const ports = [
+    { serial: '21235737A', description: 'Signal Hound A' },
+    { serial: '21235737B', description: 'Signal Hound B' },
+    { serial: 'FT1234A', description: 'Some other FT2232H A' },
+    { serial: 'FT1234B', description: 'Some other FT2232H B' },
+    { serial: '30000001A', description: 'Signal Hound A' },
+    { serial: '30000001B', description: 'Signal Hound B' },
+  ];
+  assert.deepEqual(saSerialsFromPorts(ports), [21235737, 30000001]);
 });

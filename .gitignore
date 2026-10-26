@@ -12,3 +12,8 @@ __pycache__/
 # makes them. The Windows build is committed because it is the one that ships.
 driver/worker/bin/darwin-*/
 driver/worker/bin/linux-*/
+
+# Signal Hound's Linux SA API, fetched by scripts/vm/provision.sh
+sdk/
+# host build of the bridge
+driver/bridge/bin/

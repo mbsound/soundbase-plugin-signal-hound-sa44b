@@ -19,6 +19,11 @@ import {
   OPEN_TIMEOUT_MS,
   DEFAULT_TIMEOUT_MS,
 } from './driver/worker-client.js';
+import * as macHost from './driver/mac-host.js';
+
+// On macOS the vendor library runs inside a Linux VM (see driver/mac-host.js);
+// everywhere else, and in mock mode, the worker is a local child process.
+const viaMacHost = () => macHost.isMacHost() && !mockRequested();
 
 // Must be a `deviceTypeId` declared in soundbase-plugin.json. The SA API
 // reports serial numbers only until a unit is opened, so every unit is
@@ -96,10 +101,9 @@ export async function discoverDevices(pluginConfig = {}) {
   discoveryInFlight = (async () => {
     let devices = [];
     try {
-      const serials = await listSerials({
-        mock: mockRequested(),
-        sdkDir: sdkDirOf(pluginConfig),
-      });
+      const serials = viaMacHost()
+        ? await macHost.listSerials()
+        : await listSerials({ mock: mockRequested(), sdkDir: sdkDirOf(pluginConfig) });
       devices = serials.map((serial) => ({
         id: `${ID_PREFIX}${serial}`,
         name: `Signal Hound SA (SN ${serial})`,
@@ -148,7 +152,8 @@ class SignalHoundAdapter {
   constructor(device, pluginConfig = {}) {
     this.device = device;
     this.serial = serialOf(device);
-    this.sdkDir = sdkDirOf(pluginConfig);
+    // sdkPath names a Windows folder; inside the VM the library has a fixed place
+    this.sdkDir = viaMacHost() ? undefined : sdkDirOf(pluginConfig);
     this.worker = null;
     this.type = UNKNOWN_TYPE;
     this.identity = null;
@@ -165,9 +170,19 @@ class SignalHoundAdapter {
   }
 
   async open() {
+    let spec = null;
+    if (viaMacHost()) {
+      try {
+        await macHost.ensureReady();
+      } catch (err) {
+        throw new Error(`Mac host setup failed: ${err.message}`);
+      }
+      spec = macHost.workerSpec({ sdkDir: this.sdkDir });
+    }
     const worker = new WorkerClient({
       mock: mockRequested(),
       sdkDir: this.sdkDir,
+      spec,
       log: (line) => this.log(line),
     });
     worker.onExit = (err) => {
