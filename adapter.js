@@ -255,6 +255,22 @@ class SignalHoundAdapter {
         help: 'Set a little above the strongest signal you expect. Lower is more sensitive; too low and strong transmitters compress the front end.',
       },
       {
+        // SoundBase draws no VBW field of its own from capabilities.vbwHz, so
+        // the knob lives here too; the two are the same setting
+        id: 'vbw',
+        type: 'dropdown',
+        label: 'VBW',
+        default: 'auto',
+        choices: [
+          { id: 'auto', label: 'Auto (= RBW)' },
+          ...(this.type.rbw6M ? [...RBW_HZ, 6_000_000] : RBW_HZ).map((hz) => ({
+            id: String(hz),
+            label: hz >= 1e6 ? `${hz / 1e6} MHz` : `${hz / 1e3} kHz`,
+          })),
+        ],
+        help: 'Video bandwidth, at most the RBW. Narrower smooths the trace and slows the sweep; Auto keeps it equal to the RBW, which the API recommends.',
+      },
+      {
         id: 'atten',
         type: 'dropdown',
         label: 'Attenuation',
@@ -363,8 +379,10 @@ class SignalHoundAdapter {
       stopHz: DEFAULT_STOP_HZ,
       pointCount: DEFAULT_POINTS,
       refLevelDbm: DEFAULT_REF_DBM,
+      fieldVbw: undefined,
       controls: {
         refLevelDbm: DEFAULT_REF_DBM,
+        vbw: 'auto',
         atten: 'auto',
         gain: 'auto',
         detector: 'minmax',
@@ -402,12 +420,28 @@ class SignalHoundAdapter {
       rbwAuto = true;
       rbwHz = Math.max(autoRbwFor(startHz, stopHz, pointCount), minRbw);
     }
-    // VBW: at most the RBW and subject to the same floor; auto (absent) means
-    // equal to the RBW, which is what the API recommends for speed.
-    const vbwAuto = !isNum(cfg.vbwHz);
-    const vbwHz = vbwAuto ? rbwHz : clamp(cfg.vbwHz, minRbw, rbwHz);
-
+    // VBW: at most the RBW and subject to the same floor; auto means equal to
+    // the RBW, which is what the API recommends for speed. The control (what
+    // the user sees) wins over the top-level field.
+    // Two knobs name one setting (the host's vbwHz field and this control),
+    // and the host resends both on every call, so the one that changed since
+    // last time is the user's latest intent; the control wins a tie.
     const controls = mergeControls(prev.controls, cfg.controls, this.type);
+    const fieldVbw = isNum(cfg.vbwHz) ? cfg.vbwHz : undefined;
+    const fieldChanged = fieldVbw !== prev.fieldVbw;
+    const controlChanged = controls.vbw !== prev.controls.vbw;
+    let vbwRequested;
+    if (controlChanged || !fieldChanged) {
+      vbwRequested = controls.vbw !== 'auto' ? Number(controls.vbw) : undefined;
+    } else {
+      vbwRequested = fieldVbw;
+    }
+    const vbwAuto = !isNum(vbwRequested);
+    const vbwHz = vbwAuto ? rbwHz : clamp(vbwRequested, minRbw, rbwHz);
+    // the control keeps the user's choice (the host stores and resends it);
+    // what the device really runs is under resolved when that differs
+    controls.vbw = vbwAuto ? 'auto' : String(vbwRequested);
+
     // the control wins over the top-level field, since it is the one the user
     // can see; both are the same knob
     const refRequested = isNum(controls.refLevelDbm)
@@ -445,6 +479,7 @@ class SignalHoundAdapter {
 
     this.sweepLength = reply.sweepLength;
     const effective = {
+      fieldVbw, // remembered to tell a changed field from a sticky control
       // the API picks the exact first bin; echo what it chose
       startHz: reply.startHz,
       stopHz: reply.stopHz,
@@ -460,10 +495,11 @@ class SignalHoundAdapter {
     else effective.rbwHz = rbwHz;
     // the host echoes the requested VBW itself, so a clamp is only visible
     // under resolved
-    if (vbwAuto || vbwHz !== cfg.vbwHz) effective.resolved.vbwHz = vbwHz;
+    if (vbwAuto || vbwHz !== vbwRequested) effective.resolved.vbwHz = vbwHz;
     if (!vbwAuto) effective.vbwHz = vbwHz;
     this.effective = effective;
-    return effective;
+    const { fieldVbw: _omit, ...reported } = effective;
+    return reported;
   }
 
   estimateSweepMs() {
@@ -543,6 +579,10 @@ function mergeControls(previous, patch, type) {
   if ('refLevelDbm' in patch) {
     const v = Number(patch.refLevelDbm);
     out.refLevelDbm = patch.refLevelDbm === null || !Number.isFinite(v) ? DEFAULT_REF_DBM : v;
+  }
+  if ('vbw' in patch) {
+    const v = Number(patch.vbw);
+    out.vbw = patch.vbw === null || patch.vbw === 'auto' || !Number.isFinite(v) || v <= 0 ? 'auto' : String(v);
   }
   if ('atten' in patch) out.atten = patch.atten === null ? 'auto' : enumOr(patch.atten, ['auto', '0', '1', '2', '3'], 'auto');
   if ('gain' in patch) out.gain = patch.gain === null ? 'auto' : enumOr(patch.gain, ['auto', '0', '1', '2'], 'auto');

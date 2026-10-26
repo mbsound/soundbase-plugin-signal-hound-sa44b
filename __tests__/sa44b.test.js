@@ -143,7 +143,7 @@ test('open() reports what this unit can do, including its controls', async () =>
   ]);
   const ids = caps.controls.map((c) => c.id);
   assert.deepEqual(ids, [
-    'refLevelDbm', 'atten', 'gain', 'detector', 'imageReject', 'rbwShape',
+    'refLevelDbm', 'vbw', 'atten', 'gain', 'detector', 'imageReject', 'rbwShape',
     'procUnits', 'timebase', 'minTrace', 'preamp',
   ]);
   assert.deepEqual(caps.vbwHz, caps.rbwHz, 'VBW is offered in the same steps as RBW');
@@ -265,6 +265,21 @@ test('VBW follows the RBW when unset and is clamped to it when set', async () =>
   });
   assert.equal(narrow.body.vbwHz, 1_000);
   assert.equal(narrow.body.resolved.vbwHz, undefined, 'an accepted VBW needs no resolved note');
+  assert.equal(narrow.body.controls.vbw, '1000', 'the VBW control mirrors the field');
+
+  // the control is the knob the user sees, and it wins over the field
+  const viaControl = await request('POST', `${DEVICE_PATH}/configuration`, {
+    startHz: START_HZ,
+    stopHz: STOP_HZ,
+    pointCount: POINT_COUNT,
+    rbwHz: 10_000,
+    controls: { vbw: '1000' },
+  });
+  assert.equal(viaControl.body.controls.vbw, '1000', 'the control keeps what the user chose');
+  assert.equal(viaControl.body.resolved.vbwHz, 6_500, 'and resolved says what the device runs');
+  const back = await request('POST', `${DEVICE_PATH}/configuration`, { controls: { vbw: 'auto' } });
+  assert.equal(back.body.controls.vbw, 'auto');
+  assert.equal(back.body.resolved.vbwHz, 10_000);
 });
 
 test('the min-detector curve arrives as a named series', async (t) => {
