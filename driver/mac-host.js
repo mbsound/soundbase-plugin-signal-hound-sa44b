@@ -104,7 +104,11 @@ export async function ensureBridge() {
     throw new Error(`ftdi-bridge is not built: run scripts/vm/provision.sh (needs brew install libftdi)`);
   }
   log(`starting ftdi-bridge on 127.0.0.1:${BRIDGE_PORT}`);
-  bridgeChild = spawn(BRIDGE_BIN, ['-b', '127.0.0.1', '-p', String(BRIDGE_PORT)], {
+  const args = ['-b', '127.0.0.1', '-p', String(BRIDGE_PORT)];
+  // SB_SA44B_BRIDGE_TRACE=<file>: log every bridge op and the bytes of every
+  // USB read and write there, for debugging the vendor library's behaviour
+  if (process.env.SB_SA44B_BRIDGE_TRACE) args.push('-v', '-t', process.env.SB_SA44B_BRIDGE_TRACE);
+  bridgeChild = spawn(BRIDGE_BIN, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   bridgeChild.stderr.on('data', (d) => {
@@ -277,6 +281,8 @@ export function workerSpec({ sdkDir } = {}) {
     `cd ${CHROOT_PLUGIN_DIR}/driver/worker/bin/linux-x64 && ` +
     `exec env LD_LIBRARY_PATH=${CHROOT_PLUGIN_DIR}/driver/shim/bin/linux-x64:${sdk} ` +
     `FTDI_BRIDGE_HOST=127.0.0.1 FTDI_BRIDGE_PORT=${BRIDGE_PORT} ` +
+    // SB_SA44B_SHIM_LOG=1: the shim logs every D2XX call to /plugin/shim.log in the VM
+    (process.env.SB_SA44B_SHIM_LOG ? `FTDI_SHIM_VERBOSE=1 FTDI_SHIM_LOG=${CHROOT_PLUGIN_DIR}/shim.log ` : '') +
     `./sa44b-worker --sdk ${sdk}`;
   return {
     command: 'limactl',

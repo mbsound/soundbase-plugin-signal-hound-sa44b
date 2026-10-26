@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../bridge/protocol.h"
@@ -52,14 +53,28 @@ static int g_fd = -1;
 static pthread_mutex_t g_mx = PTHREAD_MUTEX_INITIALIZER;
 static int g_verbose = -1;
 
+static FILE *g_log = NULL;
+
+static double now_s(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
 static void logv(const char *fmt, ...) {
-  if (g_verbose < 0) g_verbose = getenv("FTDI_SHIM_VERBOSE") != NULL;
+  if (g_verbose < 0) {
+    g_verbose = getenv("FTDI_SHIM_VERBOSE") != NULL;
+    const char *path = getenv("FTDI_SHIM_LOG"); /* a file instead of stderr */
+    g_log = (path && *path) ? fopen(path, "a") : NULL;
+    if (!g_log) g_log = stderr;
+  }
   if (!g_verbose) return;
   va_list ap;
   va_start(ap, fmt);
-  fputs("[ftd2xx-shim] ", stderr);
-  vfprintf(stderr, fmt, ap);
-  fputc('\n', stderr);
+  fprintf(g_log, "[ftd2xx-shim %.3f] ", now_s());
+  vfprintf(g_log, fmt, ap);
+  fputc('\n', g_log);
+  fflush(g_log);
   va_end(ap);
 }
 
