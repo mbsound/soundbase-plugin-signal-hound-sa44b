@@ -115,9 +115,13 @@ contains both DLLs.
   applied before the request reaches the hardware and echoed back as the
   effective value, so a 10 kHz request on a 146 MHz span sweeps at 10 kHz and
   a 1 kHz request on the same span sweeps at 6.5 kHz.
-- **Reference level** from -100 to +20 dBm. Leave attenuation and gain on
-  *Auto* and set the reference level a little above the strongest expected
-  signal: that is how the API picks the front end for the best dynamic range.
+- **Reference level** from -100 to +20 dBm, as a device control (SoundBase's
+  live-scan dialog has no field of its own for it), **default -50 dBm**.
+  Leave attenuation and gain on *Auto* and set the reference level a little
+  above the strongest expected signal: that is how the API picks the front
+  end for the best dynamic range. At -20 dBm the displayed floor sits near
+  -80 dBm; at -50 to -60 dBm with the preamp on it reaches about -100 dBm at
+  10 kHz RBW, which is where a coordination sweep needs to be.
 - **Controls**, rendered by SoundBase beside RBW and point count: attenuation,
   gain, detector (peak or average), image rejection, RBW filter shape, and —
   on the SA44B only — the internal preamplifier.

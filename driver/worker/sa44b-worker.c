@@ -566,7 +566,8 @@ static void op_open(long id, const char *line) {
       reply_error(id, "sa_error", true, "saOpenDevice: %s (%d)", sa_error_string(st), st);
       return;
     }
-    logf_("opened device in %.0f ms", now_ms() - t0);
+    logf_("opened device in %.0f ms (status %d%s%s)", now_ms() - t0, st,
+          st > 0 ? ": " : "", st > 0 ? sa_error_string(st) : "");
     sa.GetSerialNumber(g_handle, &g_serial);
     sa.GetDeviceType(g_handle, &g_type);
     char fw[16] = {0};

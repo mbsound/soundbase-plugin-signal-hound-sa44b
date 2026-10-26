@@ -57,7 +57,12 @@ const MAX_POINTS = 10_000;
 const DEFAULT_START_HZ = 470_000_000;
 const DEFAULT_STOP_HZ = 616_000_000;
 const DEFAULT_POINTS = 451;
-const DEFAULT_REF_DBM = -20;
+// SoundBase's live-scan dialog has no reference-level field, so the level is
+// a device control here. -50 dBm is where a coordination sweep belongs: the
+// API picks attenuation and gain for signals at or below the reference, and
+// at -20 dBm the displayed floor sits around -80 dBm, which hides everything a
+// coordinator cares about.
+const DEFAULT_REF_DBM = -50;
 // Spent learning the real sweep rate: a first guess, refined from every sweep.
 const DEFAULT_MS_PER_BIN = 0.03;
 const SWEEP_OVERHEAD_MS = 250;
@@ -236,6 +241,17 @@ class SignalHoundAdapter {
     const step = this.type.attenStepDb;
     const controls = [
       {
+        id: 'refLevelDbm',
+        type: 'number',
+        label: 'Reference level',
+        unit: 'dBm',
+        default: DEFAULT_REF_DBM,
+        min: MIN_REF_DBM,
+        max: MAX_REF_DBM,
+        step: 5,
+        help: 'Set a little above the strongest signal you expect. Lower is more sensitive; too low and strong transmitters compress the front end.',
+      },
+      {
         id: 'atten',
         type: 'dropdown',
         label: 'Attenuation',
@@ -313,6 +329,7 @@ class SignalHoundAdapter {
       pointCount: DEFAULT_POINTS,
       refLevelDbm: DEFAULT_REF_DBM,
       controls: {
+        refLevelDbm: DEFAULT_REF_DBM,
         atten: 'auto',
         gain: 'auto',
         detector: 'minmax',
@@ -351,13 +368,16 @@ class SignalHoundAdapter {
     // recommends for best performance.
     const vbwHz = isNum(cfg.vbwHz) ? clamp(cfg.vbwHz, minRbw, rbwHz) : rbwHz;
 
-    const refLevelDbm = clamp(
-      isNum(cfg.refLevelDbm) ? cfg.refLevelDbm : prev.refLevelDbm,
-      MIN_REF_DBM,
-      MAX_REF_DBM
-    );
-
     const controls = mergeControls(prev.controls, cfg.controls, this.type);
+    // the control wins over the top-level field, since it is the one the user
+    // can see; both are the same knob
+    const refRequested = isNum(controls.refLevelDbm)
+      ? controls.refLevelDbm
+      : isNum(cfg.refLevelDbm)
+        ? cfg.refLevelDbm
+        : prev.refLevelDbm;
+    const refLevelDbm = clamp(Math.round(refRequested), MIN_REF_DBM, MAX_REF_DBM);
+    controls.refLevelDbm = refLevelDbm;
 
     const reply = await this.worker.call(
       'config',
@@ -468,6 +488,10 @@ function mergeControls(previous, patch, type) {
   if (!patch || typeof patch !== 'object') return out;
   const enumOr = (v, allowed, fallback) =>
     allowed.includes(String(v)) ? String(v) : fallback;
+  if ('refLevelDbm' in patch) {
+    const v = Number(patch.refLevelDbm);
+    out.refLevelDbm = patch.refLevelDbm === null || !Number.isFinite(v) ? DEFAULT_REF_DBM : v;
+  }
   if ('atten' in patch) out.atten = patch.atten === null ? 'auto' : enumOr(patch.atten, ['auto', '0', '1', '2', '3'], 'auto');
   if ('gain' in patch) out.gain = patch.gain === null ? 'auto' : enumOr(patch.gain, ['auto', '0', '1', '2'], 'auto');
   if ('detector' in patch) out.detector = enumOr(patch.detector, ['minmax', 'average'], 'minmax');

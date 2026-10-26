@@ -142,7 +142,7 @@ test('open() reports what this unit can do, including its controls', async () =>
     'min-hold',
   ]);
   const ids = caps.controls.map((c) => c.id);
-  assert.deepEqual(ids, ['atten', 'gain', 'detector', 'imageReject', 'rbwShape', 'preamp']);
+  assert.deepEqual(ids, ['refLevelDbm', 'atten', 'gain', 'detector', 'imageReject', 'rbwShape', 'preamp']);
   assert.equal(device.name, `Signal Hound SA (SN ${MOCK_SERIAL})`);
 });
 
@@ -261,6 +261,12 @@ test('a partial request leaves the rest in force; controls merge by id', async (
   assert.equal(first.body.controls.preamp, true);
   assert.equal(first.body.controls.detector, 'average');
   assert.equal(first.body.controls.gain, 'auto', 'untouched control keeps its default');
+  assert.equal(first.body.controls.refLevelDbm, -50, 'reference level defaults to -50 dBm');
+
+  const ref = await request('POST', `${DEVICE_PATH}/configuration`, {
+    controls: { refLevelDbm: 37 },
+  });
+  assert.equal(ref.body.controls.refLevelDbm, 20, 'reference level is clamped to the API maximum');
 
   const second = await request('POST', `${DEVICE_PATH}/configuration`, {
     controls: { gain: '1' },
