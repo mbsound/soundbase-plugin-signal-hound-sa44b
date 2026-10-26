@@ -122,9 +122,15 @@ contains both DLLs.
   end for the best dynamic range. At -20 dBm the displayed floor sits near
   -80 dBm; at -50 to -60 dBm with the preamp on it reaches about -100 dBm at
   10 kHz RBW, which is where a coordination sweep needs to be.
-- **Controls**, rendered by SoundBase beside RBW and point count: attenuation,
-  gain, detector (peak or average), image rejection, RBW filter shape, and —
-  on the SA44B only — the internal preamplifier.
+- **VBW**, offered in the same steps as RBW and clamped to at most the RBW.
+  Left on auto it equals the RBW, which is what the API recommends for
+  speed; narrower smooths the trace and slows the sweep.
+- **Controls**, rendered by SoundBase beside RBW and point count, covering
+  everything the SA API exposes for a sweep: reference level, attenuation,
+  gain, detector (peak or average), image rejection, RBW filter shape, video
+  processing units (log, power, voltage, bypass), the 10 MHz timebase port
+  (internal, external in, internal out), a second **Min** curve from the
+  min/max detector, and — on the SA44B only — the internal preamplifier.
 - A **sweep-time estimate** with every configuration, refined from measured
   sweeps, so SoundBase does not mistake a slow wide sweep for a stalled
   device. The SA44B is not fast: a 146 MHz UHF span at 10 kHz RBW takes on

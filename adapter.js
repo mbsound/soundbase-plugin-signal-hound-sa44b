@@ -229,6 +229,9 @@ class SignalHoundAdapter {
         minFrequencyHz: this.type.minHz,
         maxFrequencyHz: this.type.maxHz,
         rbwHz: this.type.rbw6M ? [...RBW_HZ, 6_000_000] : [...RBW_HZ],
+        // VBW is arbitrary in the API (at most the RBW); offered as the same
+        // steps so the form draws a VBW field. Omitted means equal to RBW.
+        vbwHz: this.type.rbw6M ? [...RBW_HZ, 6_000_000] : [...RBW_HZ],
         minRefLevelDbm: MIN_REF_DBM,
         maxRefLevelDbm: MAX_REF_DBM,
         controls: this.controls(),
@@ -304,6 +307,38 @@ class SignalHoundAdapter {
           { id: 'cispr', label: 'Gaussian / CISPR (6 dB)' },
         ],
       },
+      {
+        id: 'procUnits',
+        type: 'dropdown',
+        label: 'Video processing',
+        default: 'log',
+        choices: [
+          { id: 'log', label: 'Log (dBm), like a classic analyzer' },
+          { id: 'power', label: 'Power (mW), for average power' },
+          { id: 'volt', label: 'Voltage (mV), cleans up AM' },
+          { id: 'bypass', label: 'Bypass (no video filtering)' },
+        ],
+        help: 'The units the VBW filter averages in. Log is the traditional choice; Power for true average-power readings.',
+      },
+      {
+        id: 'timebase',
+        type: 'dropdown',
+        label: 'Timebase',
+        default: 'internal',
+        choices: [
+          { id: 'internal', label: 'Internal' },
+          { id: 'external', label: 'External 10 MHz in (BNC)' },
+          { id: 'internal-out', label: 'Internal, 10 MHz out (BNC)' },
+        ],
+        help: 'With External selected and no reference on the BNC port the device stays on its internal clock. Once locked to an external reference it stays there until the device is reopened.',
+      },
+      {
+        id: 'minTrace',
+        type: 'checkbox',
+        label: 'Min-detector curve',
+        default: false,
+        help: 'Also report the minimum-detector trace as a second curve named Min. Only meaningful with the Peak (min/max) detector.',
+      },
     ];
     if (this.type.preamp) {
       controls.push({
@@ -335,6 +370,9 @@ class SignalHoundAdapter {
         detector: 'minmax',
         imageReject: true,
         rbwShape: 'flattop',
+        procUnits: 'log',
+        timebase: 'internal',
+        minTrace: false,
         preamp: false,
       },
     };
@@ -364,9 +402,10 @@ class SignalHoundAdapter {
       rbwAuto = true;
       rbwHz = Math.max(autoRbwFor(startHz, stopHz, pointCount), minRbw);
     }
-    // VBW: at most the RBW; auto means equal to it, which is what the API
-    // recommends for best performance.
-    const vbwHz = isNum(cfg.vbwHz) ? clamp(cfg.vbwHz, minRbw, rbwHz) : rbwHz;
+    // VBW: at most the RBW and subject to the same floor; auto (absent) means
+    // equal to the RBW, which is what the API recommends for speed.
+    const vbwAuto = !isNum(cfg.vbwHz);
+    const vbwHz = vbwAuto ? rbwHz : clamp(cfg.vbwHz, minRbw, rbwHz);
 
     const controls = mergeControls(prev.controls, cfg.controls, this.type);
     // the control wins over the top-level field, since it is the one the user
@@ -394,10 +433,15 @@ class SignalHoundAdapter {
         detector: controls.detector,
         imageReject: Boolean(controls.imageReject),
         rbwShape: controls.rbwShape,
+        procUnits: controls.procUnits,
+        timebase: controls.timebase,
+        minTrace: Boolean(controls.minTrace),
       },
       { timeoutMs: Math.max(DEFAULT_TIMEOUT_MS, 30_000) }
     );
     if (reply.warnings > 0) this.log(`API warning: ${reply.warning}`);
+    // the device reports what it is really clocked from
+    if (typeof reply.timebase === 'string') controls.timebase = reply.timebase;
 
     this.sweepLength = reply.sweepLength;
     const effective = {
@@ -406,7 +450,6 @@ class SignalHoundAdapter {
       stopHz: reply.stopHz,
       pointCount: reply.pointCount,
       refLevelDbm,
-      vbwHz,
       controls,
       resolved: {
         sweepTimeMs: this.estimateSweepMs(),
@@ -415,6 +458,10 @@ class SignalHoundAdapter {
     };
     if (rbwAuto) effective.resolved.rbwHz = rbwHz;
     else effective.rbwHz = rbwHz;
+    // the host echoes the requested VBW itself, so a clamp is only visible
+    // under resolved
+    if (vbwAuto || vbwHz !== cfg.vbwHz) effective.resolved.vbwHz = vbwHz;
+    if (!vbwAuto) effective.vbwHz = vbwHz;
     this.effective = effective;
     return effective;
   }
@@ -445,7 +492,12 @@ class SignalHoundAdapter {
             const measured = Math.max(0, reply.sweepMs - 20) / this.sweepLength;
             this.msPerBin = this.msPerBin * 0.7 + measured * 0.3;
           }
-          if (this.sweeping && this.worker === worker) onTrace(reply.amps);
+          if (this.sweeping && this.worker === worker) {
+            const series = Array.isArray(reply.mins)
+              ? [{ name: 'Min', amplitudesDbm: reply.mins }]
+              : undefined;
+            onTrace(reply.amps, series);
+          }
         } catch (err) {
           if (!this.sweeping || this.worker !== worker) return;
           consecutiveErrors += 1;
@@ -496,6 +548,9 @@ function mergeControls(previous, patch, type) {
   if ('gain' in patch) out.gain = patch.gain === null ? 'auto' : enumOr(patch.gain, ['auto', '0', '1', '2'], 'auto');
   if ('detector' in patch) out.detector = enumOr(patch.detector, ['minmax', 'average'], 'minmax');
   if ('rbwShape' in patch) out.rbwShape = enumOr(patch.rbwShape, ['flattop', 'cispr'], 'flattop');
+  if ('procUnits' in patch) out.procUnits = enumOr(patch.procUnits, ['log', 'power', 'volt', 'bypass'], 'log');
+  if ('timebase' in patch) out.timebase = enumOr(patch.timebase, ['internal', 'external', 'internal-out'], 'internal');
+  if ('minTrace' in patch) out.minTrace = patch.minTrace === null ? false : Boolean(patch.minTrace);
   if ('imageReject' in patch) out.imageReject = patch.imageReject === null ? true : Boolean(patch.imageReject);
   if ('preamp' in patch) out.preamp = type.preamp && Boolean(patch.preamp);
   if (!type.preamp) out.preamp = false;

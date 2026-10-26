@@ -16,7 +16,8 @@
  *   {"id":4,"op":"config","startHz":470e6,"stopHz":616e6,"pointCount":451,
  *            "rbwHz":10000,"vbwHz":10000,"refLevelDbm":-20,"atten":-1,
  *            "gain":-1,"preamp":false,"detector":"minmax","imageReject":true,
- *            "rbwShape":"flattop"}
+ *            "rbwShape":"flattop","procUnits":"log","timebase":"internal",
+ *            "minTrace":false}
  *   {"id":5,"op":"sweep"}
  *   {"id":6,"op":"abort"}
  *   {"id":7,"op":"close"}
@@ -61,10 +62,17 @@ typedef int saDeviceType;
 #define SA_LOG_SCALE 0
 #define SA_RBW_SHAPE_FLATTOP 1
 #define SA_RBW_SHAPE_CISPR 2
+#define SA_LOG_UNITS 0
+#define SA_VOLT_UNITS 1
+#define SA_POWER_UNITS 2
+#define SA_BYPASS 3
+#define SA_REF_INTERNAL_OUT 1
+#define SA_REF_EXTERNAL_IN 2
 #define SA_MAX_DEVICES 8
 
 #define saNoError 0
 #define saUSBCommErr (-11)
+#define saExternalReferenceNotFound (-89)
 #define saDeviceNotFoundErr (-8)
 #define saDeviceNotOpenErr (-3)
 #define saInvalidDeviceErr (-2)
@@ -83,6 +91,8 @@ typedef saStatus (*fn_saConfigLevel)(int device, double ref);
 typedef saStatus (*fn_saConfigGainAtten)(int device, int atten, int gain, bool preAmp);
 typedef saStatus (*fn_saConfigSweepCoupling)(int device, double rbw, double vbw, bool reject);
 typedef saStatus (*fn_saConfigRBWShape)(int device, int shape);
+typedef saStatus (*fn_saConfigProcUnits)(int device, int units);
+typedef saStatus (*fn_saSetTimebase)(int device, int timebase);
 typedef saStatus (*fn_saInitiate)(int device, int mode, int flag);
 typedef saStatus (*fn_saQuerySweepInfo)(int device, int *len, double *start, double *bin);
 typedef saStatus (*fn_saGetSweep_32f)(int device, float *min, float *max);
@@ -106,6 +116,8 @@ static struct {
   fn_saConfigGainAtten ConfigGainAtten;
   fn_saConfigSweepCoupling ConfigSweepCoupling;
   fn_saConfigRBWShape ConfigRBWShape;
+  fn_saConfigProcUnits ConfigProcUnits;
+  fn_saSetTimebase SetTimebase;
   fn_saInitiate Initiate;
   fn_saQuerySweepInfo QuerySweepInfo;
   fn_saGetSweep_32f GetSweep_32f;
@@ -139,6 +151,9 @@ static int g_point_count = 0;
 static float *g_min = NULL;
 static float *g_max = NULL;
 static double *g_out = NULL;
+static double *g_out_min = NULL;
+static bool g_min_trace = false;
+static int g_timebase_applied = 0; /* 0 internal, SA_REF_* once set */
 
 /* mock-only */
 static double g_mock_rbw = 10000;
@@ -368,6 +383,8 @@ static bool load_library(const char *explicit_dir, const char *exe_dir) {
   LOAD(ConfigGainAtten);
   LOAD(ConfigSweepCoupling);
   LOAD(ConfigRBWShape);
+  LOAD(ConfigProcUnits);
+  LOAD(SetTimebase);
   LOAD(Initiate);
   LOAD(QuerySweepInfo);
   LOAD(GetSweep_32f);
@@ -432,23 +449,22 @@ static void mock_sweep(void) {
 /* Resampling                                                               */
 /* ------------------------------------------------------------------------ */
 
-/* Resample the device's sweep (g_max, g_sweep_len bins from g_start_hz at
+/* Resample a device sweep (`src`, g_sweep_len bins from g_start_hz at
  * g_bin_hz) onto g_point_count points spanning the same range. Where several
- * bins fall into one output point, the maximum is kept so a narrow carrier
- * never disappears between points; where output points are denser than bins,
- * values are linearly interpolated. */
-static void resample(void) {
+ * bins fall into one output point the maximum (or, for the min trace, the
+ * minimum) is kept so a narrow carrier never disappears between points; where
+ * output points are denser than bins, values are linearly interpolated. */
+static void resample(const float *src, double *out, bool keep_min) {
   int n = g_point_count;
   int len = g_sweep_len;
   if (n <= 0 || len <= 0) return;
   if (len == 1) {
-    for (int j = 0; j < n; j++) g_out[j] = g_max[0];
+    for (int j = 0; j < n; j++) out[j] = src[0];
     return;
   }
   double stop = g_start_hz + g_bin_hz * (len - 1);
   double step = (n > 1) ? (stop - g_start_hz) / (n - 1) : 0;
   if (step >= g_bin_hz) {
-    /* decimate by max over the bucket [p - step/2, p + step/2] */
     for (int j = 0; j < n; j++) {
       double p = g_start_hz + j * step;
       double lo = (p - step / 2 - g_start_hz) / g_bin_hz;
@@ -463,21 +479,21 @@ static void resample(void) {
         if (k > len - 1) k = len - 1;
         a = b = k;
       }
-      float m = g_max[a];
+      float m = src[a];
       for (int k = a + 1; k <= b; k++)
-        if (g_max[k] > m) m = g_max[k];
-      g_out[j] = m;
+        if (keep_min ? src[k] < m : src[k] > m) m = src[k];
+      out[j] = m;
     }
   } else {
     for (int j = 0; j < n; j++) {
       double pos = (j * step) / g_bin_hz;
       int k = (int)floor(pos);
       if (k >= len - 1) {
-        g_out[j] = g_max[len - 1];
+        out[j] = src[len - 1];
         continue;
       }
       double t = pos - k;
-      g_out[j] = g_max[k] * (1 - t) + g_max[k + 1] * t;
+      out[j] = src[k] * (1 - t) + src[k + 1] * t;
     }
   }
 }
@@ -486,10 +502,12 @@ static bool ensure_buffers(int sweep_len, int point_count) {
   float *mn = (float *)realloc(g_min, sizeof(float) * (size_t)sweep_len);
   float *mx = (float *)realloc(g_max, sizeof(float) * (size_t)sweep_len);
   double *out = (double *)realloc(g_out, sizeof(double) * (size_t)point_count);
-  if (!mn || !mx || !out) return false;
+  double *outmin = (double *)realloc(g_out_min, sizeof(double) * (size_t)point_count);
+  if (!mn || !mx || !out || !outmin) return false;
   g_min = mn;
   g_max = mx;
   g_out = out;
+  g_out_min = outmin;
   return true;
 }
 
@@ -595,7 +613,8 @@ static void op_config(long id, const char *line) {
   double start = 470e6, stop = 616e6, points = 451, rbw = 10e3, vbw = -1, ref = -20;
   double atten = -1, gain = -1;
   bool preamp = false, reject = true;
-  char detector[32] = "minmax", shape[32] = "flattop";
+  char detector[32] = "minmax", shape[32] = "flattop", units[32] = "log", timebase[32] = "internal";
+  bool min_trace = false;
   json_number(line, "startHz", &start);
   json_number(line, "stopHz", &stop);
   json_number(line, "pointCount", &points);
@@ -608,6 +627,9 @@ static void op_config(long id, const char *line) {
   json_bool(line, "imageReject", &reject);
   json_string(line, "detector", detector, sizeof detector);
   json_string(line, "rbwShape", shape, sizeof shape);
+  json_string(line, "procUnits", units, sizeof units);
+  json_string(line, "timebase", timebase, sizeof timebase);
+  json_bool(line, "minTrace", &min_trace);
   if (vbw <= 0) vbw = rbw;
   if (vbw > rbw) vbw = rbw;
   if (stop <= start) stop = start + 1;
@@ -616,6 +638,13 @@ static void op_config(long id, const char *line) {
   if (point_count > 100000) point_count = 100000;
   int det = (strcmp(detector, "average") == 0) ? SA_AVERAGE : SA_MIN_MAX;
   int rbw_shape = (strcmp(shape, "cispr") == 0) ? SA_RBW_SHAPE_CISPR : SA_RBW_SHAPE_FLATTOP;
+  int proc_units = strcmp(units, "volt") == 0 ? SA_VOLT_UNITS
+                   : strcmp(units, "power") == 0 ? SA_POWER_UNITS
+                   : strcmp(units, "bypass") == 0 ? SA_BYPASS : SA_LOG_UNITS;
+  int tb_wanted = strcmp(timebase, "external") == 0 ? SA_REF_EXTERNAL_IN
+                  : strcmp(timebase, "internal-out") == 0 ? SA_REF_INTERNAL_OUT : 0;
+  g_min_trace = min_trace;
+  const char *tb_effective = "internal";
 
   double center = (start + stop) / 2;
   double span = stop - start;
@@ -623,6 +652,7 @@ static void op_config(long id, const char *line) {
   char warn_text[256] = "";
 
   if (g_mock) {
+    g_timebase_applied = tb_wanted;
     g_mock_rbw = rbw;
     g_mock_detector = det;
     double bin = rbw / 2.0;
@@ -655,7 +685,32 @@ static void op_config(long id, const char *line) {
     CHECK(sa.ConfigGainAtten(g_handle, (int)atten, (int)gain, preamp), "saConfigGainAtten");
     CHECK(sa.ConfigSweepCoupling(g_handle, rbw, vbw, reject), "saConfigSweepCoupling");
     CHECK(sa.ConfigRBWShape(g_handle, rbw_shape), "saConfigRBWShape");
+    CHECK(sa.ConfigProcUnits(g_handle, proc_units), "saConfigProcUnits");
     CHECK(sa.ConfigAcquisition(g_handle, det, SA_LOG_SCALE), "saConfigAcquisition");
+    /* The reference port: only sent when it changes. A missing external
+     * reference is not an error for the sweep; the device stays on its
+     * internal clock and the echo says so. Once on an external reference the
+     * API keeps it until the device is closed. */
+    if (tb_wanted != g_timebase_applied) {
+      if (tb_wanted == 0 && g_timebase_applied == SA_REF_EXTERNAL_IN) {
+        warnings++;
+        snprintf(warn_text, sizeof warn_text,
+                 "saSetTimebase: an external reference stays selected until the device is reopened");
+      } else if (tb_wanted != 0) {
+        st = sa.SetTimebase(g_handle, tb_wanted);
+        if (st == saExternalReferenceNotFound) {
+          warnings++;
+          snprintf(warn_text, sizeof warn_text, "saSetTimebase: no 10 MHz reference found on the BNC port");
+        } else if (st < 0) {
+          reply_error(id, "sa_error", sa_is_fatal(st), "saSetTimebase: %s (%d)", sa_error_string(st), st);
+          return;
+        } else {
+          g_timebase_applied = tb_wanted;
+        }
+      } else {
+        g_timebase_applied = 0; /* internal-out -> internal: nothing to send */
+      }
+    }
     CHECK(sa.Initiate(g_handle, SA_SWEEPING, 0), "saInitiate");
     g_initiated = true;
     int len = 0;
@@ -677,16 +732,21 @@ static void op_config(long id, const char *line) {
     return;
   }
   double eff_stop = g_start_hz + g_bin_hz * (g_sweep_len - 1);
+  tb_effective = g_timebase_applied == SA_REF_EXTERNAL_IN ? "external"
+                 : g_timebase_applied == SA_REF_INTERNAL_OUT ? "internal-out" : "internal";
   char warn_esc[600];
   json_escape(warn_text, warn_esc, sizeof warn_esc);
   printf("{\"id\":%ld,\"ok\":true,\"startHz\":%.3f,\"stopHz\":%.3f,\"pointCount\":%d,"
          "\"sweepLength\":%d,\"binSizeHz\":%.6f,\"rbwHz\":%.3f,\"vbwHz\":%.3f,\"refLevelDbm\":%.2f,"
          "\"atten\":%d,\"gain\":%d,\"preamp\":%s,\"imageReject\":%s,\"detector\":\"%s\","
-         "\"rbwShape\":\"%s\",\"warnings\":%d,\"warning\":\"%s\"}\n",
+         "\"rbwShape\":\"%s\",\"procUnits\":\"%s\",\"timebase\":\"%s\",\"minTrace\":%s,"
+         "\"warnings\":%d,\"warning\":\"%s\"}\n",
          id, g_start_hz, eff_stop, g_point_count, g_sweep_len, g_bin_hz, rbw, vbw, ref, (int)atten,
          (int)gain, preamp ? "true" : "false", reject ? "true" : "false",
          det == SA_AVERAGE ? "average" : "minmax", rbw_shape == SA_RBW_SHAPE_CISPR ? "cispr" : "flattop",
-         warnings, warn_esc);
+         proc_units == SA_VOLT_UNITS ? "volt" : proc_units == SA_POWER_UNITS ? "power"
+                                                                           : proc_units == SA_BYPASS ? "bypass" : "log",
+         tb_effective, min_trace ? "true" : "false", warnings, warn_esc);
   fflush(stdout);
 }
 
@@ -710,10 +770,11 @@ static void op_sweep(long id) {
     }
   }
   double ms = now_ms() - t0;
-  resample();
+  resample(g_max, g_out, false);
+  if (g_min_trace) resample(g_min, g_out_min, true);
 
-  /* one line: {"id":N,"ok":true,"sweepMs":123,"amps":[...]} */
-  size_t cap = 24 * (size_t)g_point_count + 128;
+  /* one line: {"id":N,"ok":true,"sweepMs":123,"amps":[...],"mins":[...]} */
+  size_t cap = 2 * 24 * (size_t)g_point_count + 160;
   char *buf = (char *)malloc(cap);
   if (!buf) {
     reply_error(id, "out_of_memory", true, "could not allocate the trace buffer");
@@ -725,7 +786,17 @@ static void op_sweep(long id) {
     if (!(v == v) || v < -200 || v > 200) v = -200; /* NaN or nonsense */
     n += (size_t)snprintf(buf + n, cap - n, "%s%.1f", j ? "," : "", v);
   }
-  n += (size_t)snprintf(buf + n, cap - n, "]}\n");
+  n += (size_t)snprintf(buf + n, cap - n, "]");
+  if (g_min_trace) {
+    n += (size_t)snprintf(buf + n, cap - n, ",\"mins\":[");
+    for (int j = 0; j < g_point_count; j++) {
+      double v = g_out_min[j];
+      if (!(v == v) || v < -200 || v > 200) v = -200;
+      n += (size_t)snprintf(buf + n, cap - n, "%s%.1f", j ? "," : "", v);
+    }
+    n += (size_t)snprintf(buf + n, cap - n, "]");
+  }
+  n += (size_t)snprintf(buf + n, cap - n, "}\n");
   fwrite(buf, 1, n, stdout);
   fflush(stdout);
   free(buf);
@@ -746,6 +817,7 @@ static void op_close(long id) {
   g_open = false;
   g_initiated = false;
   g_sweep_len = 0;
+  g_timebase_applied = 0;
   printf("{\"id\":%ld,\"ok\":true}\n", id);
   fflush(stdout);
 }

@@ -142,7 +142,11 @@ test('open() reports what this unit can do, including its controls', async () =>
     'min-hold',
   ]);
   const ids = caps.controls.map((c) => c.id);
-  assert.deepEqual(ids, ['refLevelDbm', 'atten', 'gain', 'detector', 'imageReject', 'rbwShape', 'preamp']);
+  assert.deepEqual(ids, [
+    'refLevelDbm', 'atten', 'gain', 'detector', 'imageReject', 'rbwShape',
+    'procUnits', 'timebase', 'minTrace', 'preamp',
+  ]);
+  assert.deepEqual(caps.vbwHz, caps.rbwHz, 'VBW is offered in the same steps as RBW');
   assert.equal(device.name, `Signal Hound SA (SN ${MOCK_SERIAL})`);
 });
 
@@ -224,6 +228,72 @@ test('an RBW the API would refuse on a wide span is clamped to 6.5 kHz', async (
   assert.equal(applied.body.rbwHz, 6_500);
   const trace = await request('GET', `${DEVICE_PATH}/configuration`);
   assert.equal(trace.body.rbwHz, 6_500, 'the echo is what GET reports');
+});
+
+test('VBW follows the RBW when unset and is clamped to it when set', async () => {
+  const auto = await request('POST', `${DEVICE_PATH}/configuration`, {
+    startHz: START_HZ,
+    stopHz: STOP_HZ,
+    pointCount: POINT_COUNT,
+    rbwHz: 30_000,
+  });
+  assert.equal(auto.body.vbwHz, undefined, 'no VBW was ever requested');
+  assert.equal(auto.body.resolved.vbwHz, 30_000, 'auto VBW follows the RBW');
+
+  // the host echoes the requested VBW in the configuration itself, so the
+  // clamp shows up under resolved, which is what the device really runs
+  const clamped = await request('POST', `${DEVICE_PATH}/configuration`, {
+    rbwHz: 10_000,
+    vbwHz: 100_000,
+  });
+  assert.equal(clamped.body.rbwHz, 10_000);
+  assert.equal(clamped.body.resolved.vbwHz, 10_000, 'VBW above the RBW is clamped to it');
+
+  // the 6.5 kHz floor on wide spans applies to VBW as well as RBW
+  const wide = await request('POST', `${DEVICE_PATH}/configuration`, {
+    rbwHz: 10_000,
+    vbwHz: 1_000,
+  });
+  assert.equal(wide.body.resolved.vbwHz, 6_500, 'VBW below the wide-span floor is raised to it');
+
+  const narrow = await request('POST', `${DEVICE_PATH}/configuration`, {
+    startHz: 500e6,
+    stopHz: 501e6,
+    pointCount: 201,
+    rbwHz: 10_000,
+    vbwHz: 1_000,
+  });
+  assert.equal(narrow.body.vbwHz, 1_000);
+  assert.equal(narrow.body.resolved.vbwHz, undefined, 'an accepted VBW needs no resolved note');
+});
+
+test('the min-detector curve arrives as a named series', async (t) => {
+  await request('POST', `${DEVICE_PATH}/configuration`, {
+    startHz: START_HZ,
+    stopHz: STOP_HZ,
+    pointCount: POINT_COUNT,
+    rbwHz: 100_000,
+    controls: { minTrace: true, procUnits: 'power', timebase: 'external' },
+  });
+  await request('POST', `${DEVICE_PATH}/sweep/start`);
+  t.after(async () => {
+    await request('POST', `${DEVICE_PATH}/sweep/stop`);
+    await request('POST', `${DEVICE_PATH}/configuration`, {
+      controls: { minTrace: false, procUnits: 'log', timebase: 'internal' },
+    });
+  });
+  const trace = await request('GET', `${DEVICE_PATH}/trace`);
+  assert.equal(trace.status, 200);
+  assert.ok(Array.isArray(trace.body.series), 'a series list is present');
+  const min = trace.body.series.find((s) => s.name === 'Min');
+  assert.ok(min, 'the Min curve is there');
+  assert.equal(min.amplitudesDbm.length, POINT_COUNT);
+  for (let i = 0; i < POINT_COUNT; i++) {
+    assert.ok(min.amplitudesDbm[i] <= trace.body.amplitudesDbm[i], `min above max at ${i}`);
+  }
+  const config = await request('GET', `${DEVICE_PATH}/configuration`);
+  assert.equal(config.body.controls.procUnits, 'power');
+  assert.equal(config.body.controls.timebase, 'external');
 });
 
 test('a narrow span accepts the small RBWs', async () => {
