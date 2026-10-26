@@ -1,0 +1,8 @@
+# driver/microvm/guest — built by scripts/build-guest.sh
+alpine: v3.22
+kernel: linux-virt-6.12.114-r0 sha256:345b2d561443cd8c978cbcc0f36f2374b3ef702debb747221384b4ddc07d6a77 (release 6.12.114-0-virt)
+busybox: busybox-static-1.37.0-r20 sha256:ee469aee2958feffd7f64dd96655704025ff60af614f77a1d7323dc237c34da2
+modules: fs/fuse/fuse fs/fuse/virtiofs net/vmw_vsock/vsock net/vmw_vsock/vmw_vsock_virtio_transport_common net/vmw_vsock/vmw_vsock_virtio_transport fs/binfmt_misc
+
+42a15047f7cfc785e008b43f48c090f6340f34ead8446d7568126bb5cb9bc9f1  Image
+2a36b9f77375431150d0b82ad18df115cf53998978f11ebeca02ffd70f84fb9f  initramfs.img

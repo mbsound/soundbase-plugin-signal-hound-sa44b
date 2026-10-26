@@ -21,8 +21,9 @@ import {
 } from './driver/worker-client.js';
 import * as macHost from './driver/mac-host.js';
 
-// On macOS the vendor library runs inside a Linux VM (see driver/mac-host.js);
-// everywhere else, and in mock mode, the worker is a local child process.
+// On macOS the vendor library runs inside a Linux guest the plugin boots
+// itself (see driver/mac-host.js); everywhere else, and in mock mode, the
+// worker is a local child process.
 const viaMacHost = () => macHost.isMacHost() && !mockRequested();
 
 // Must be a `deviceTypeId` declared in soundbase-plugin.json. The SA API
@@ -175,19 +176,19 @@ class SignalHoundAdapter {
   }
 
   async open() {
-    let spec = null;
+    let socketPath = null;
     if (viaMacHost()) {
       try {
         await macHost.ensureReady();
       } catch (err) {
         throw new Error(`Mac host setup failed: ${err.message}`);
       }
-      spec = macHost.workerSpec({ sdkDir: this.sdkDir });
+      socketPath = macHost.workerSocketPath();
     }
     const worker = new WorkerClient({
       mock: mockRequested(),
       sdkDir: this.sdkDir,
-      spec,
+      socketPath,
       log: (line) => this.log(line),
     });
     worker.onExit = (err) => {

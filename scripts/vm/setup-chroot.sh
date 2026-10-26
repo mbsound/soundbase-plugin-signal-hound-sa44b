@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
-# Runs INSIDE the Lima VM (arm64 Ubuntu, Rosetta enabled). Creates an x86-64
-# Ubuntu chroot at /amd64 where Signal Hound's x86-64 libsa_api.so can run
-# under Rosetta, and builds the shim and the worker inside it.
+# Runs INSIDE a Lima VM (arm64 Ubuntu, Rosetta enabled). Creates an x86-64
+# Ubuntu chroot at /amd64 with gcc, which scripts/build-x86.sh --lima uses to
+# compile the x86-64 side of the macOS runtime. Developer tooling only.
 #
-#   limactl shell sa44b -- sudo bash /path/to/setup-chroot.sh /path/to/plugin
-#
-# Everything x86-64 stays inside the chroot; the VM's own userland stays arm64.
+#   limactl shell <instance> -- sudo bash setup-chroot.sh
 
 set -euo pipefail
-PLUGIN_DIR="${1:?plugin directory (as mounted in the VM)}"
 CHROOT=/amd64
 RELEASE=noble
 BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/$RELEASE/release"
@@ -29,27 +26,14 @@ if [ ! -x "$CHROOT/bin/bash" ]; then
 fi
 
 mount_if() { mountpoint -q "$CHROOT$1" || mount --bind "$1" "$CHROOT$1"; }
-mkdir -p "$CHROOT/proc" "$CHROOT/sys" "$CHROOT/dev" "$CHROOT/mnt/lima-rosetta" "$CHROOT/plugin"
+mkdir -p "$CHROOT/proc" "$CHROOT/sys" "$CHROOT/dev" "$CHROOT/mnt/lima-rosetta"
 mountpoint -q "$CHROOT/proc" || mount -t proc proc "$CHROOT/proc"
 mount_if /sys
 mount_if /dev
 mount_if /mnt/lima-rosetta
-mountpoint -q "$CHROOT/plugin" || mount --bind "$PLUGIN_DIR" "$CHROOT/plugin"
 
 if [ ! -x "$CHROOT/usr/bin/gcc" ]; then
   echo "[setup] installing gcc in the chroot (under Rosetta)"
-  chroot "$CHROOT" /bin/bash -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev libstdc++6 libusb-1.0-0 ca-certificates >/dev/null"
+  chroot "$CHROOT" /bin/bash -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev binutils ca-certificates >/dev/null"
 fi
-
-echo "[setup] building the shim and the worker for x86-64"
-chroot "$CHROOT" /bin/bash -c '
-  set -e
-  cd /plugin
-  mkdir -p driver/shim/bin/linux-x64 driver/worker/bin/linux-x64
-  gcc -O2 -Wall -shared -fPIC -o driver/shim/bin/linux-x64/libftd2xx.so driver/shim/ftd2xx-shim.c -lpthread
-  gcc -O2 -Wall -std=c11 -D_DEFAULT_SOURCE -o driver/worker/bin/linux-x64/sa44b-worker driver/worker/sa44b-worker.c -lm -ldl
-  file driver/shim/bin/linux-x64/libftd2xx.so driver/worker/bin/linux-x64/sa44b-worker 2>/dev/null || true
-'
-# what the chroot built belongs to whoever owns the plugin directory
-chown -R "$(stat -c %u:%g "$PLUGIN_DIR")" "$PLUGIN_DIR/driver/shim/bin" "$PLUGIN_DIR/driver/worker/bin"
-echo "[setup] done"
+echo "[setup] done: x86-64 chroot with $(chroot "$CHROOT" gcc --version | head -1)"

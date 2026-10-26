@@ -10,9 +10,14 @@
  * placed where the dynamic loader finds it instead of FTDI's library.
  *
  * Environment:
- *   FTDI_BRIDGE_HOST  default "host.lima.internal" (Lima's host alias)
- *   FTDI_BRIDGE_PORT  default 7788
+ *   FTDI_BRIDGE_VSOCK_CID  set (normally 2, the host) to reach the bridge over
+ *                          AF_VSOCK instead of TCP; the launcher on the Mac
+ *                          proxies that vsock port to the bridge's TCP port
+ *   FTDI_BRIDGE_HOST  TCP host, default "host.lima.internal" (Lima's host alias)
+ *   FTDI_BRIDGE_PORT  default 7788 (TCP port, or vsock port)
  *   FTDI_SHIM_VERBOSE set to log every call to stderr
+ *
+ * The wire protocol is the same over both transports.
  */
 
 #define _GNU_SOURCE
@@ -32,6 +37,19 @@
 #include <unistd.h>
 
 #include "../bridge/protocol.h"
+
+#ifndef AF_VSOCK
+#define AF_VSOCK 40
+#endif
+/* <linux/vm_sockets.h> is not in every sysroot; the layout is fixed ABI */
+struct sockaddr_vm_compat {
+  unsigned short svm_family;
+  unsigned short svm_reserved1;
+  unsigned int svm_port;
+  unsigned int svm_cid;
+  unsigned char svm_zero[sizeof(struct sockaddr) - sizeof(unsigned short) - sizeof(unsigned short) -
+                         sizeof(unsigned int) - sizeof(unsigned int)];
+};
 
 /* FTDI's types, as its Linux WinTypes.h defines them */
 typedef uint32_t DWORD;
@@ -78,12 +96,43 @@ static void logv(const char *fmt, ...) {
   va_end(ap);
 }
 
+/* a decimal parser of our own: strtoul under _GNU_SOURCE binds to a glibc
+ * 2.38 symbol on newer toolchains, and the guest ships an older glibc */
+static unsigned int parse_uint(const char *s) {
+  unsigned int v = 0;
+  while (s && *s >= '0' && *s <= '9') v = v * 10 + (unsigned int)(*s++ - '0');
+  return v;
+}
+
+static int connect_vsock(const char *cid_s, const char *port) {
+  struct sockaddr_vm_compat sa;
+  memset(&sa, 0, sizeof sa);
+  sa.svm_family = AF_VSOCK;
+  sa.svm_cid = parse_uint(cid_s);
+  sa.svm_port = parse_uint(port);
+  int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+  if (fd < 0) {
+    logv("cannot create a vsock socket: %s", strerror(errno));
+    return -1;
+  }
+  if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+    logv("cannot connect to ftdi-bridge at vsock %u:%u: %s", sa.svm_cid, sa.svm_port, strerror(errno));
+    close(fd);
+    return -1;
+  }
+  g_fd = fd;
+  logv("connected to ftdi-bridge at vsock %u:%u", sa.svm_cid, sa.svm_port);
+  return 0;
+}
+
 static int connect_bridge(void) {
   if (g_fd >= 0) return 0;
   const char *host = getenv("FTDI_BRIDGE_HOST");
   const char *port = getenv("FTDI_BRIDGE_PORT");
+  const char *vsock_cid = getenv("FTDI_BRIDGE_VSOCK_CID");
   if (!host || !*host) host = "host.lima.internal";
   if (!port || !*port) port = "7788";
+  if (vsock_cid && *vsock_cid) return connect_vsock(vsock_cid, port);
   struct addrinfo hints, *res = NULL;
   memset(&hints, 0, sizeof hints);
   hints.ai_family = AF_INET;

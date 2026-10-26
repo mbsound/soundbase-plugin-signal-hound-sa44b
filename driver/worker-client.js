@@ -12,6 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
@@ -52,15 +53,18 @@ export class WorkerClient {
    * @param {string}  [options.sdkDir]   folder holding sa_api.dll + ftd2xx.dll
    * @param {string}  [options.binary]   explicit worker path (tests)
    * @param {string[]} [options.args]    arguments placed before the worker's own (tests)
-   * @param {{command: string, args: string[]}} [options.spec]
-   *        a complete launch command (used on macOS, where the worker runs
-   *        inside the Linux VM); when given, binary/args/--sdk are not used
+   * @param {string} [options.socketPath]
+   *        a unix socket instead of a child process (macOS, where the worker
+   *        runs inside the Linux guest: driver/mac-host.js hands one out, and
+   *        every connection to it is a fresh worker whose stdio is the socket);
+   *        when given, binary/args/--sdk are not used
    * @param {(msg: string) => void} [options.log]
    */
-  constructor({ mock = mockRequested(), sdkDir, binary, args = [], spec, log } = {}) {
+  constructor({ mock = mockRequested(), sdkDir, binary, args = [], socketPath, log } = {}) {
     this.mock = mock;
     this.sdkDir = sdkDir;
-    this.spec = spec ?? null;
+    this.socketPath = socketPath ?? null;
+    this.sock = null;
     this.binary = binary ?? workerBinaryPath();
     this.extraArgs = args;
     this.log = log ?? (() => {});
@@ -74,17 +78,21 @@ export class WorkerClient {
   }
 
   get alive() {
-    return this.child !== null && !this.exited;
+    return (this.child !== null || this.sock !== null) && !this.exited;
   }
 
   start() {
-    if (this.child) return;
-    if (this.spec) {
-      this.child = spawn(this.spec.command, this.spec.args, {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env },
-      });
-      this.wire();
+    if (this.child || this.sock) return;
+    if (this.socketPath) {
+      this.sock = createConnection(this.socketPath);
+      this.sock.setNoDelay(true);
+      this.sock.on('error', (err) => this.die(err));
+      this.sock.on('close', () =>
+        this.die(
+          new WorkerError('sa44b-worker connection closed', { code: 'worker_exited', fatal: true })
+        )
+      );
+      createInterface({ input: this.sock }).on('line', (line) => this.onLine(line));
       return;
     }
     if (!this.binary) {
@@ -151,9 +159,14 @@ export class WorkerClient {
     }
   }
 
+  /** The worker's stdin: a pipe, or the socket it was started from. */
+  get input() {
+    return this.sock ?? this.child?.stdin;
+  }
+
   /** Send one request; resolves with the worker's reply object. */
   call(op, fields = {}, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-    if (!this.child) this.start();
+    if (!this.child && !this.sock) this.start();
     if (this.exited) {
       return Promise.reject(
         this.exitError ??
@@ -179,7 +192,7 @@ export class WorkerClient {
       }, timeoutMs);
       timer.unref?.();
       this.pending.set(id, { resolve, reject, timer });
-      this.child.stdin.write(JSON.stringify({ id, op, ...fields }) + '\n', (err) => {
+      this.input.write(JSON.stringify({ id, op, ...fields }) + '\n', (err) => {
         if (err) this.die(err);
       });
     });
@@ -203,6 +216,12 @@ export class WorkerClient {
 
   /** Hard stop. Never blocks: the whole point is that this always works. */
   kill() {
+    if (this.sock) {
+      // dropping the connection is the kill: the guest agent SIGKILLs the
+      // worker the moment the host hangs up
+      this.sock.destroy();
+      return;
+    }
     const child = this.child;
     if (!child) return;
     try {
@@ -219,7 +238,7 @@ export class WorkerClient {
 
   /** Polite stop: ask the worker to close the device and exit, then kill. */
   async stop() {
-    if (!this.child || this.exited) return;
+    if ((!this.child && !this.sock) || this.exited) return;
     try {
       await this.call('exit', {}, { timeoutMs: 5_000 });
     } catch {

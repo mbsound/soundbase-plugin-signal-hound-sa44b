@@ -13,7 +13,11 @@ __pycache__/
 driver/worker/bin/darwin-*/
 driver/worker/bin/linux-*/
 
-# Signal Hound's Linux SA API, fetched by scripts/vm/provision.sh
+# Signal Hound's Linux SA API, fetched by the plugin on first open (older
+# checkouts kept a copy here)
 sdk/
-# host build of the bridge
-driver/bridge/bin/
+
+# intermediate downloads and objects of the macOS runtime builds; the
+# outputs under driver/bridge/bin, driver/microvm/bin and driver/microvm/guest
+# are committed because the release zip is made of tracked files
+build/

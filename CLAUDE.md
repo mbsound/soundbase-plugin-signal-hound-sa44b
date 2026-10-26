@@ -23,11 +23,14 @@ The author writes device logic. The author never writes UI, IPC, or HTTP.
 soundbase-plugin.json   identity, products, config fields
 main.js                 shell bootstrap — never edit
 adapter.js              device logic — this is the file that changes
-driver/                 optional: protocol-specific code adapter.js uses
+driver/                 protocol code adapter.js uses; driver/microvm/ is the
+                        macOS runtime (Virtualization.framework launcher, Linux
+                        guest, x86-64 payload) — see docs/macos-runtime.md
 __tests__/              contract tests, driven through the real shell
 examples/network-analyzer/   a second complete plugin, over TCP, with a fake device
 docs/                   the guide set; docs/README.md indexes it
-scripts/                doctor, smoke, manifest, rename, bump-version, release, pack-release
+scripts/                doctor, smoke, manifest, rename, bump-version, release, pack-release,
+                        build-bridge/launcher/guest/x86 (the macOS runtime; outputs are committed)
 ```
 
 ## Invariants — do not violate these without being asked

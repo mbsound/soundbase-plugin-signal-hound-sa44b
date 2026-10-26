@@ -16,14 +16,15 @@ live spectrum source for RF coordination.
 There is no macOS SA API, no published USB protocol and no open-source
 driver, so the only code that can drive an SA44B on a Mac is the x86-64 Linux
 `libsa_api.so.3.0.11` that Signal Hound still ships (marked obsolete) inside
-their SDK zip. This plugin runs it like this:
+their SDK zip. This plugin runs it out of its own folder, with nothing to
+install:
 
 ```
-SoundBase Desktop ── plugin (Node, arm64) ── limactl shell ──▶ Lima VM "sa44b" (arm64 Ubuntu)
-                           │                                     └─ /amd64 chroot (x86-64, Rosetta)
-                           │                                          sa44b-worker ─ libsa_api.so ─ shim libftd2xx.so
-                           │                                                                              │ D2XX calls over TCP
-                           └─ ftdi-bridge (macOS, libusb) ◀── ssh reverse tunnel, 127.0.0.1:7788 ─────────┘
+SoundBase Desktop ── plugin (Node, arm64) ── sa44b-vm (Virtualization.framework) ──▶ Linux guest (arm64 kernel + busybox initramfs)
+                           │                        │  virtiofs: Rosetta, x86 payload, cache       │ Rosetta binfmt
+                           │                        │  vsock: worker channel, bridge channel       └─ vsock-agent ─ sa44b-worker (x86-64)
+                           │                        │                                                   libsa_api.so ─ shim libftd2xx.so
+                           └─ ftdi-bridge (static libusb) ◀── launcher proxies vsock port 7788 ──▶ TCP 127.0.0.1:7788 ◀────┘
                                    │
                               SA44B (FT2232H, both ports)
 ```
@@ -31,26 +32,38 @@ SoundBase Desktop ── plugin (Node, arm64) ── limactl shell ──▶ Lim
 - `driver/bridge/ftdi-bridge.c` holds the SA44B's two FTDI ports through
   libusb (no root, no kernel extension; it coexists with Apple's FTDI driver)
   and serves the thirteen D2XX calls the library uses, with D2XX semantics
-  (blocking reads with timeouts, queue status, port cycling).
-- `driver/shim/ftd2xx-shim.c` is an x86-64 `libftd2xx.so` that forwards
-  every call to the bridge.
-- `driver/mac-host.js` starts the bridge, the VM, the chroot mounts and the
-  tunnel when a device is opened, and launches the worker inside the VM.
+  (blocking reads with timeouts, queue status, port cycling). It is linked
+  statically against libusb and libftdi, so it needs nothing from Homebrew.
+- `driver/microvm/Launcher.swift` is a small launcher on Apple's
+  Virtualization.framework: it boots the guest in `driver/microvm/guest/`
+  (an Alpine `linux-virt` kernel and a busybox initramfs, pinned by version
+  and digest), shares Rosetta and two host directories with it, and exposes
+  a vsock. No Lima, no ssh, no disk image.
+- The guest's `/init` mounts the shares, registers Rosetta for x86-64 ELFs
+  and starts `vsock-agent`, which hands the plugin a fresh `sa44b-worker`
+  for every connection. The x86-64 side (`driver/microvm/guest/x86/`) is the
+  worker, the agent, the shim `libftd2xx.so` that forwards every D2XX call
+  over the vsock to the bridge, and the Debian glibc/libstdc++ the library
+  needs. No distribution, no package manager.
+- `driver/mac-host.js` runs it all: starts the bridge, fetches the library
+  on first open, checks Rosetta, boots the guest and connects the adapter to
+  a worker.
 
-### Setup (once)
+### Setup
 
-```sh
-brew install lima libftdi
-npm install
-scripts/vm/provision.sh
-```
+None. Install the plugin in SoundBase (or `npm install && npm start` from a
+checkout with the built runtime committed in it). The first time a device is
+opened the plugin:
 
-`provision.sh` builds the bridge, downloads Signal Hound's SDK zip (about
-160 MB; cached) and extracts the Linux library from it, creates the Lima VM
-with Rosetta, builds an x86-64 Ubuntu chroot inside it, and compiles the shim
-and the worker there. It takes a few minutes the first time and is safe to
-re-run. The library is not part of this repository; Signal Hound's API
-licence governs it and it is fetched for use with your own device.
+1. downloads Signal Hound's SDK zip (about 160 MB, with a progress line in
+   the plugin log) and extracts `libsa_api.so.3.0.11` from it into
+   `~/Library/Caches/signal-hound-sa44b/state/sdk/`. The library is not part
+   of this plugin; Signal Hound's API licence governs it and it is fetched
+   for use with your own device.
+2. makes sure Rosetta is available. macOS 27 has it built in; on macOS 13 to
+   26 the plugin runs `softwareupdate --install-rosetta --agree-to-license`
+   when it is missing and says so in the log.
+3. boots the guest, which takes well under a second.
 
 Then `npm start`, or point SoundBase Desktop at the folder:
 
@@ -59,25 +72,37 @@ SB_PLUGIN_DIRS="$HOME/Documents" open -a "SoundBase Desktop"
 ```
 
 What to expect: discovery lists the unit by serial within a second (the
-bridge enumerates it directly). The first open after a VM boot takes about
-10 s (5–6 s of that is the library's own open sequence, which cycles the USB
-port once). A 146 MHz UHF span at 10 kHz RBW sweeps in about 1.4 s. The
-library pulls the unit's calibration files from the device's flash on first
-open, so no internet access is needed.
+bridge enumerates it directly; the guest is not needed for that). The first
+open after a boot takes about 10 s (5–6 s of that is the library's own open
+sequence, which cycles the USB port once). A 146 MHz UHF span at 10 kHz RBW
+sweeps in about 1.4 s. The library pulls the unit's calibration files from
+the device's flash on first open and keeps them in the cache directory, so
+no internet access is needed after the SDK download.
 
 Measured on this path with an SA44B (firmware 2.12): stable UHF sweeps with
 repeatable peaks across consecutive sweeps, 76 650 device bins resampled to
 451 points.
+
+The guest lives and dies with the plugin process: the launcher exits when
+the plugin's pipe to it closes, and the agent kills a worker the moment the
+plugin drops its connection, so a wedged library never survives a restart
+and nothing is left running when SoundBase quits.
 
 Caveats:
 
 - Signal Hound warns that their non-Windows FTDI paths can lose data on slow
   systems; the bridge buffers up to 32 MB per port and has not dropped data
   in testing, but this is an unsupported library on an unsupported OS.
-- Only Apple Silicon: Rosetta for Linux is what runs the x86-64 library at
-  native speed. An Intel Mac would need an x86-64 Linux VM instead.
-- Quitting SoundBase leaves the Lima VM running (`limactl stop sa44b` to stop
-  it). The bridge and tunnel are children of the plugin and go away with it.
+- Only Apple Silicon, macOS 13 or newer: Rosetta for Linux is what runs the
+  x86-64 library at native speed. An Intel Mac would need an x86-64 Linux VM
+  instead.
+- macOS allows two Virtualization.framework VMs at a time. If another VM
+  product (Lima, Docker Desktop, Parallels on Apple's hypervisor) already
+  holds both, opening the device fails with "The virtual machine failed to
+  start"; stop one of them.
+
+Building the runtime yourself, signing it for distribution, and what to do
+when it does not come up are in `docs/macos-runtime.md`.
 
 ## Windows
 
@@ -151,11 +176,18 @@ driver/
   worker/sa44b-worker.c    the only code that touches sa_api.dll
   worker/bin/<target>/     built workers (win32-x64 is committed; host builds
                            are made locally)
-  bridge/                  macOS: FTDI D2XX over TCP, on libusb
+  bridge/                  macOS: FTDI D2XX over TCP, on libusb (static)
   shim/                    Linux: libftd2xx.so that forwards to the bridge
-  mac-host.js              macOS: VM, bridge, tunnel and worker launch
+  microvm/                 macOS: the Virtualization.framework launcher, the
+                           guest (kernel, initramfs, x86-64 payload) and the
+                           guest agent
+  mac-host.js              macOS: bridge, library fetch, Rosetta, guest boot
 scripts/build-worker.sh    builds the worker for the host and, with mingw-w64
                            installed, for Windows
+scripts/build-bridge.sh    the static bridge (libusb + libftdi from source)
+scripts/build-launcher.sh  the launcher (swiftc + codesign)
+scripts/build-guest.sh     the guest kernel and initramfs (Alpine packages)
+scripts/build-x86.sh       the x86-64 payload (docker or a Lima chroot)
 __tests__/                 contract tests through the real shell, in mock mode
 ```
 
