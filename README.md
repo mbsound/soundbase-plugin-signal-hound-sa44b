@@ -124,7 +124,10 @@ contains both DLLs.
   10 kHz RBW, which is where a coordination sweep needs to be.
 - **VBW**, offered in the same steps as RBW and clamped to at most the RBW.
   Left on auto it equals the RBW, which is what the API recommends for
-  speed; narrower smooths the trace and slows the sweep.
+  speed; narrower smooths the trace and slows the sweep. The device's
+  6.5 kHz floor on spans of 100 MHz or more applies to VBW as well as RBW
+  (the API clamps it itself and reports "bandwidth limited"), so on a wide
+  span VBW only has room once the RBW is above 6.5 kHz.
 - **Controls**, rendered by SoundBase beside RBW and point count, covering
   everything the SA API exposes for a sweep: reference level, attenuation,
   gain, detector (peak or average), image rejection, RBW filter shape, video

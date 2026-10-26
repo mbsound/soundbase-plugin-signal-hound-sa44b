@@ -268,7 +268,7 @@ class SignalHoundAdapter {
             label: hz >= 1e6 ? `${hz / 1e6} MHz` : `${hz / 1e3} kHz`,
           })),
         ],
-        help: 'Video bandwidth, at most the RBW. Narrower smooths the trace and slows the sweep; Auto keeps it equal to the RBW, which the API recommends.',
+        help: 'Video bandwidth, at most the RBW. Narrower smooths the trace and slows the sweep; Auto keeps it equal to the RBW, which the API recommends. On spans of 100 MHz or more the device holds both RBW and VBW at 6.5 kHz or above, so VBW only has room there when the RBW is set higher.',
       },
       {
         id: 'atten',
