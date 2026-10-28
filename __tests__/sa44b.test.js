@@ -424,12 +424,20 @@ test('a worker that dies mid-sweep marks the device failed, not healthy', async 
 
   // the USB cable comes out: from here, the vendor library's process is gone
   const { execSync } = await import('node:child_process');
-  const pids = execSync('pgrep -f "sa44b-worker.* --mock" || true', { encoding: 'utf8' })
+  // "[s]" keeps the pattern from matching the shell that runs pgrep, which
+  // Linux's pgrep -f would otherwise report alongside the worker
+  const pids = execSync('pgrep -f "[s]a44b-worker.* --mock" || true', { encoding: 'utf8' })
     .split('\n')
     .map((s) => Number(s))
     .filter((n) => Number.isInteger(n) && n > 0 && n !== process.pid);
   assert.ok(pids.length > 0, 'a worker process is running while sweeping');
-  for (const pid of pids) process.kill(pid, 'SIGKILL');
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (err) {
+      if (err.code !== 'ESRCH') throw err; // already gone is what we wanted
+    }
+  }
 
   const deadline = Date.now() + 5_000;
   let status = null;
