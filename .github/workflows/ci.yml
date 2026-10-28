@@ -28,7 +28,7 @@ jobs:
         # If your plugin talks to hardware, the OS matrix is still worth having:
         # path handling, process termination and line endings differ, and those
         # are exactly the bugs that reach users first.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
         node: [22, 24]
 
     steps:
@@ -55,6 +55,11 @@ jobs:
       - name: Validate the manifest against the contract schema
         run: npm run manifest
 
+      # the tests drive a real worker process in mock mode
+      - name: Build the worker for mock mode
+        shell: bash
+        run: bash scripts/build-worker.sh
+
       - name: Test
         run: npm test
 
@@ -71,5 +76,9 @@ jobs:
         shell: bash
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      - name: Build the worker for mock mode
+        run: bash scripts/build-worker.sh
       - name: Boot, handshake, and serve a trace
+        env:
+          SB_SA44B_MOCK: '1'
         run: npm run smoke

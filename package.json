@@ -17,7 +17,12 @@
     "rename": "node scripts/rename.mjs",
     "bump": "node scripts/bump-version.mjs",
     "pack:release": "node scripts/pack-release.mjs",
-    "build:worker": "bash scripts/build-worker.sh"
+    "build:worker": "bash scripts/build-worker.sh",
+    "build:bridge": "bash scripts/build-bridge.sh",
+    "build:launcher": "bash scripts/build-launcher.sh",
+    "build:guest": "bash scripts/build-guest.sh",
+    "build:x86": "bash scripts/build-x86.sh",
+    "build:mac": "npm run build:bridge && npm run build:launcher && npm run build:guest && npm run build:x86"
   },
   "dependencies": {
     "@soundbase/plugin-contract": "^0.12.2",

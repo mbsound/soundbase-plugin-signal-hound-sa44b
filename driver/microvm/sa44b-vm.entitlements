@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Virtualization.framework refuses to create a VM without this. It
+	     works with an ad-hoc signature for local builds; a distributed
+	     binary must carry it under a Developer ID signature. -->
+	<key>com.apple.security.virtualization</key>
+	<true/>
+</dict>
+</plist>

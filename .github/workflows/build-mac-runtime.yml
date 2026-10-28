@@ -1,0 +1,59 @@
+# Rebuild the macOS runtime from its pinned inputs, on hosted runners, with
+# nothing installed by hand: the guest image and the x86-64 payload on Linux
+# (Docker for the x86-64 compile), the bridge and the launcher on macOS.
+#
+# The outputs are committed in the repository (the release zip is made of
+# tracked files), so this workflow is a check that they can be reproduced
+# and the way to refresh them: run it, download the artifact, commit.
+# A Developer ID signature for distribution is applied at release time, not
+# here (docs/macos-runtime.md, "Signing").
+name: Build macOS runtime
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'driver/microvm/**'
+      - 'driver/bridge/**'
+      - 'driver/shim/**'
+      - 'driver/worker/sa44b-worker.c'
+      - 'scripts/build-*.sh'
+      - 'scripts/x86-compile.sh'
+      - 'scripts/mkinitramfs.py'
+
+jobs:
+  guest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Guest kernel and initramfs
+        run: bash scripts/build-guest.sh
+      - name: x86-64 payload (Docker, debian:bookworm-slim by digest)
+        run: bash scripts/build-x86.sh --docker
+      - name: Size check (the whole guest must stay well under 100 MB)
+        run: |
+          du -sh driver/microvm/guest
+          test "$(du -sm driver/microvm/guest | cut -f1)" -lt 100
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest
+          path: |
+            driver/microvm/guest/Image
+            driver/microvm/guest/initramfs.img
+            driver/microvm/guest/MANIFEST
+            driver/microvm/guest/x86/
+
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: ftdi-bridge (static libusb + libftdi)
+        run: bash scripts/build-bridge.sh
+      - name: sa44b-vm launcher (ad-hoc signed)
+        run: bash scripts/build-launcher.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            driver/bridge/bin/
+            driver/microvm/bin/

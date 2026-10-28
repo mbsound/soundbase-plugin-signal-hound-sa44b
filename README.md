@@ -4,26 +4,31 @@ A [SoundBase](https://soundbase.app) plugin that turns a Signal Hound **SA44B**
 USB spectrum analyzer (and its siblings, the SA44, SA124A and SA124B) into a
 live spectrum source for RF coordination.
 
-> **About macOS.** Signal Hound ships the SA-series API for Windows only and
-> has said repeatedly that the SA44/SA124 are Windows-only. This plugin runs
-> natively on Windows, and on **Apple Silicon Macs** it runs Signal Hound's
-> obsolete x86-64 **Linux** build of the same API inside a small Linux VM,
-> bridging its USB traffic back to the Mac. That path is real and works —
-> the sections below describe both.
+This plugin runs on **Apple Silicon Macs** (macOS 13 or newer) only. It runs
+Signal Hound's obsolete x86-64 **Linux** build of their SA API inside a small
+Linux guest it boots itself, and bridges the analyzer's USB traffic back to
+the Mac.
+
+> **Not supported by Signal Hound.** Signal Hound supports the SA44 and SA124
+> on Windows only and does not support them on macOS or Apple Silicon. They do
+> not support this plugin, and they cannot help with problems running it.
+> Report problems with this plugin through its own GitHub repository, not to
+> Signal Hound.
 
 ## macOS (Apple Silicon)
 
 There is no macOS SA API, no published USB protocol and no open-source
 driver, so the only code that can drive an SA44B on a Mac is the x86-64 Linux
 `libsa_api.so.3.0.11` that Signal Hound still ships (marked obsolete) inside
-their SDK zip. This plugin runs it like this:
+their SDK zip. This plugin runs it out of its own folder, with nothing to
+install:
 
 ```
-SoundBase Desktop ── plugin (Node, arm64) ── limactl shell ──▶ Lima VM "sa44b" (arm64 Ubuntu)
-                           │                                     └─ /amd64 chroot (x86-64, Rosetta)
-                           │                                          sa44b-worker ─ libsa_api.so ─ shim libftd2xx.so
-                           │                                                                              │ D2XX calls over TCP
-                           └─ ftdi-bridge (macOS, libusb) ◀── ssh reverse tunnel, 127.0.0.1:7788 ─────────┘
+SoundBase Desktop ── plugin (Node, arm64) ── sa44b-vm (Virtualization.framework) ──▶ Linux guest (arm64 kernel + busybox initramfs)
+                           │                        │  virtiofs: Rosetta, x86 payload, cache       │ Rosetta binfmt
+                           │                        │  vsock: worker channel, bridge channel       └─ vsock-agent ─ sa44b-worker (x86-64)
+                           │                        │                                                   libsa_api.so ─ shim libftd2xx.so
+                           └─ ftdi-bridge (static libusb) ◀── launcher proxies vsock port 7788 ──▶ TCP 127.0.0.1:7788 ◀────┘
                                    │
                               SA44B (FT2232H, both ports)
 ```
@@ -31,26 +36,38 @@ SoundBase Desktop ── plugin (Node, arm64) ── limactl shell ──▶ Lim
 - `driver/bridge/ftdi-bridge.c` holds the SA44B's two FTDI ports through
   libusb (no root, no kernel extension; it coexists with Apple's FTDI driver)
   and serves the thirteen D2XX calls the library uses, with D2XX semantics
-  (blocking reads with timeouts, queue status, port cycling).
-- `driver/shim/ftd2xx-shim.c` is an x86-64 `libftd2xx.so` that forwards
-  every call to the bridge.
-- `driver/mac-host.js` starts the bridge, the VM, the chroot mounts and the
-  tunnel when a device is opened, and launches the worker inside the VM.
+  (blocking reads with timeouts, queue status, port cycling). It is linked
+  statically against libusb and libftdi, so it needs nothing from Homebrew.
+- `driver/microvm/Launcher.swift` is a small launcher on Apple's
+  Virtualization.framework: it boots the guest in `driver/microvm/guest/`
+  (an Alpine `linux-virt` kernel and a busybox initramfs, pinned by version
+  and digest), shares Rosetta and two host directories with it, and exposes
+  a vsock. No Lima, no ssh, no disk image.
+- The guest's `/init` mounts the shares, registers Rosetta for x86-64 ELFs
+  and starts `vsock-agent`, which hands the plugin a fresh `sa44b-worker`
+  for every connection. The x86-64 side (`driver/microvm/guest/x86/`) is the
+  worker, the agent, the shim `libftd2xx.so` that forwards every D2XX call
+  over the vsock to the bridge, and the Debian glibc/libstdc++ the library
+  needs. No distribution, no package manager.
+- `driver/mac-host.js` runs it all: starts the bridge, fetches the library
+  on first open, checks Rosetta, boots the guest and connects the adapter to
+  a worker.
 
-### Setup (once)
+### Setup
 
-```sh
-brew install lima libftdi
-npm install
-scripts/vm/provision.sh
-```
+None. Install the plugin in SoundBase (or `npm install && npm start` from a
+checkout with the built runtime committed in it). The first time a device is
+opened the plugin:
 
-`provision.sh` builds the bridge, downloads Signal Hound's SDK zip (about
-160 MB; cached) and extracts the Linux library from it, creates the Lima VM
-with Rosetta, builds an x86-64 Ubuntu chroot inside it, and compiles the shim
-and the worker there. It takes a few minutes the first time and is safe to
-re-run. The library is not part of this repository; Signal Hound's API
-licence governs it and it is fetched for use with your own device.
+1. downloads Signal Hound's SDK zip (about 160 MB, with a progress line in
+   the plugin log) and extracts `libsa_api.so.3.0.11` from it into
+   `~/Library/Caches/signal-hound-sa44b/state/sdk/`. The library is not part
+   of this plugin; Signal Hound's API licence governs it and it is fetched
+   for use with your own device.
+2. makes sure Rosetta is available. macOS 27 has it built in; on macOS 13 to
+   26 the plugin runs `softwareupdate --install-rosetta --agree-to-license`
+   when it is missing and says so in the log.
+3. boots the guest, which takes well under a second.
 
 Then `npm start`, or point SoundBase Desktop at the folder:
 
@@ -59,47 +76,37 @@ SB_PLUGIN_DIRS="$HOME/Documents" open -a "SoundBase Desktop"
 ```
 
 What to expect: discovery lists the unit by serial within a second (the
-bridge enumerates it directly). The first open after a VM boot takes about
-10 s (5–6 s of that is the library's own open sequence, which cycles the USB
-port once). A 146 MHz UHF span at 10 kHz RBW sweeps in about 1.4 s. The
-library pulls the unit's calibration files from the device's flash on first
-open, so no internet access is needed.
+bridge enumerates it directly; the guest is not needed for that). The first
+open after a boot takes about 10 s (5–6 s of that is the library's own open
+sequence, which cycles the USB port once). A 146 MHz UHF span at 10 kHz RBW
+sweeps in about 1.4 s. The library pulls the unit's calibration files from
+the device's flash on first open and keeps them in the cache directory, so
+no internet access is needed after the SDK download.
 
 Measured on this path with an SA44B (firmware 2.12): stable UHF sweeps with
 repeatable peaks across consecutive sweeps, 76 650 device bins resampled to
 451 points.
+
+The guest lives and dies with the plugin process: the launcher exits when
+the plugin's pipe to it closes, and the agent kills a worker the moment the
+plugin drops its connection, so a wedged library never survives a restart
+and nothing is left running when SoundBase quits.
 
 Caveats:
 
 - Signal Hound warns that their non-Windows FTDI paths can lose data on slow
   systems; the bridge buffers up to 32 MB per port and has not dropped data
   in testing, but this is an unsupported library on an unsupported OS.
-- Only Apple Silicon: Rosetta for Linux is what runs the x86-64 library at
-  native speed. An Intel Mac would need an x86-64 Linux VM instead.
-- Quitting SoundBase leaves the Lima VM running (`limactl stop sa44b` to stop
-  it). The bridge and tunnel are children of the plugin and go away with it.
+- Only Apple Silicon, macOS 13 or newer: Rosetta for Linux is what runs the
+  x86-64 library at native speed. An Intel Mac would need an x86-64 Linux VM
+  instead.
+- macOS allows two Virtualization.framework VMs at a time. If another VM
+  product (Lima, Docker Desktop, Parallels on Apple's hypervisor) already
+  holds both, opening the device fails with "The virtual machine failed to
+  start"; stop one of them.
 
-## Windows
-
-1. **SoundBase Desktop** for Windows.
-2. **Spike**, Signal Hound's own software, installed from
-   [signalhound.com](https://signalhound.com/spike/). Installing Spike is the
-   supported way to get three things this plugin needs:
-   - the FTDI D2XX USB driver the SA44B talks through;
-   - `sa_api.dll` and `ftd2xx.dll`, in `C:\Program Files\Signal Hound\Spike`,
-     which the plugin loads from there by default;
-   - the Visual C++ runtime the DLL depends on.
-3. **Internet access the first time a unit is opened** on that PC. The API
-   downloads the unit's calibration file from Signal Hound and caches it under
-   `C:\ProgramData\SignalHound`. That first open can take well over the usual
-   five seconds; the plugin allows 90.
-
-Open the SA44B in Spike once to confirm it sweeps. Close Spike before using
-SoundBase: only one program can hold the device.
-
-If `sa_api.dll` lives somewhere else, set **SA API folder** in the plugin's
-settings (or the `SB_SA44B_SDK_DIR` environment variable) to the folder that
-contains both DLLs.
+Building the runtime yourself, signing it for distribution, and what to do
+when it does not come up are in `docs/macos-runtime.md`.
 
 ## What SoundBase gets
 
@@ -143,34 +150,41 @@ contains both DLLs.
 
 ```
 soundbase-plugin.json      identity, the SA44B product, config fields
+THIRD-PARTY-NOTICES.md     the third-party components and their licences
+licenses/                  the full licence texts
 main.js                    shell bootstrap — unchanged from the template
 adapter.js                 device logic: capabilities, clamping, the sweep loop
 driver/
   worker-client.js         one child process per device, JSON lines over stdio,
                            a deadline on every call, SIGKILL when one is missed
-  worker/sa44b-worker.c    the only code that touches sa_api.dll
-  worker/bin/<target>/     built workers (win32-x64 is committed; host builds
-                           are made locally)
-  bridge/                  macOS: FTDI D2XX over TCP, on libusb
+  worker/sa44b-worker.c    the only code that touches the SA API
+  worker/bin/<target>/     host builds for mock mode (not committed)
+  bridge/                  macOS: FTDI D2XX over TCP, on libusb (static)
   shim/                    Linux: libftd2xx.so that forwards to the bridge
-  mac-host.js              macOS: VM, bridge, tunnel and worker launch
-scripts/build-worker.sh    builds the worker for the host and, with mingw-w64
-                           installed, for Windows
+  microvm/                 macOS: the Virtualization.framework launcher, the
+                           guest (kernel, initramfs, x86-64 payload) and the
+                           guest agent
+  mac-host.js              macOS: bridge, library fetch, Rosetta, guest boot
+scripts/build-worker.sh    builds the worker for this machine (mock mode)
+scripts/build-bridge.sh    the static bridge (libusb + libftdi from source)
+scripts/build-launcher.sh  the launcher (swiftc + codesign)
+scripts/build-guest.sh     the guest kernel and initramfs (Alpine packages)
+scripts/build-x86.sh       the x86-64 payload (docker or a Lima chroot)
+scripts/fetch-sources.sh   the GPL/LGPL corresponding sources, for each release
 __tests__/                 contract tests through the real shell, in mock mode
 ```
 
 The vendor library is blocking and owns a USB device, so it never runs inside
-the plugin's own process. `sa44b-worker` loads `sa_api.dll` at runtime and
-answers one request at a time; if a USB transfer wedges, the plugin kills the
-worker, reports the device as failed, and stays alive for every other device.
-The worker binary is a plain C program with no dependencies beyond the DLLs
-Spike installs.
+the plugin's own process. `sa44b-worker` loads `libsa_api.so` at runtime
+inside the guest and answers one request at a time; if a USB transfer wedges,
+the plugin drops the worker's connection, the guest kills it, and the plugin
+reports the device as failed and stays alive for every other device.
 
 ## Running without hardware (mock mode)
 
 ```sh
 npm install
-npm run build:worker        # needs a C compiler; adds mingw-w64 for the Windows build
+npm run build:worker        # needs a C compiler
 SB_SA44B_MOCK=1 npm start   # the worker produces a synthetic spectrum
 npm test                    # the tests set SB_SA44B_MOCK themselves
 SB_SA44B_MOCK=1 npm run smoke
@@ -181,20 +195,15 @@ library is replaced — so the process boundary, the RPC, the deadline, the
 resampling and the failure path are all exercised. The synthetic unit reports
 serial `12345678` and a spectrum with two carriers and an occasional transient.
 
-To see the mock device inside SoundBase Desktop on a development machine, add
-that machine's platform (for example `darwin-arm64`) to `platforms` in the
-manifest temporarily, then:
+To see the mock device inside SoundBase Desktop:
 
 ```sh
 SB_SA44B_MOCK=1 SB_PLUGIN_DIRS="$HOME/CODE" open -a "SoundBase Desktop"
 ```
 
-Put the platform list back before releasing.
-
 ## Testing against the real SA44B
 
-On the Windows machine, with Spike installed and closed and the unit plugged
-in:
+With the unit plugged in:
 
 ```sh
 npm install
@@ -205,27 +214,32 @@ Then, in another shell, using the port the handshake line printed:
 
 ```sh
 curl localhost:PORT/devices
-curl -X POST localhost:PORT/devices/usb%3Asa%3ASERIAL/configuration -H "content-type: application/json" -d "{\"startHz\":470000000,\"stopHz\":616000000,\"pointCount\":451,\"rbwHz\":10000}"
+curl -X POST localhost:PORT/devices/usb%3Asa%3ASERIAL/configuration -H "content-type: application/json" -d '{"startHz":470000000,"stopHz":616000000,"pointCount":451,"rbwHz":10000}'
 curl -X POST localhost:PORT/devices/usb%3Asa%3ASERIAL/sweep/start
 curl localhost:PORT/devices/usb%3Asa%3ASERIAL/trace
 ```
 
-The worker can also be driven by hand, which is the quickest way to see what
-the API says about a unit:
-
-```sh
-printf "%s\n" "{\"id\":1,\"op\":\"ping\"}" "{\"id\":2,\"op\":\"list\"}" "{\"id\":3,\"op\":\"open\"}" | driver\worker\bin\win32-x64\sa44b-worker.exe
-```
+The first configuration request boots the guest and opens the unit, which
+takes about 8 s. `docs/macos-runtime.md` shows how to boot the guest by hand
+and talk to a worker directly.
 
 ## Releasing
 
 `npm run pack:release` builds `dist/signal-hound-sa44b-<version>.zip` and
 boots it the way SoundBase does. The GitHub Actions workflow in
-`.github/workflows/release.yml` does the same on a tag, building the worker
-for Windows with mingw-w64 first. See `docs/publishing.md`.
+`.github/workflows/release.yml` does the same on a tag and publishes the zip
+together with `signal-hound-sa44b-<version>-sources.tar`, the corresponding
+source of the GPL and LGPL components (`THIRD-PARTY-NOTICES.md`). See
+`docs/publishing.md`.
 
-The plugin does **not** bundle `sa_api.dll` or `ftd2xx.dll`; Signal Hound's
-API licence governs their redistribution, and installing Spike provides them.
+The macOS runtime under `driver/` is committed, because the zip is made of
+tracked files. Rebuild it with `npm run build:mac` after changing anything
+it is built from. Its binaries are ad-hoc signed, which is all a Lab install
+needs; see the signing section of `docs/macos-runtime.md`.
+
+The plugin does **not** bundle Signal Hound's library. Their API licence
+governs it, and the plugin downloads it from signalhound.com to the user's
+Mac on first use.
 
 ## Known limits
 
@@ -233,6 +247,8 @@ API licence governs their redistribution, and installing Spike provides them.
 - The SA API reports only serial numbers until a unit is opened, so every
   unit is listed under the SA44B product; the model it really is appears
   once it has been opened.
-- Not yet verified against hardware. The adapter follows the SA API manual
-  and the code paths are tested against the worker in mock mode, but the
-  first run on a Windows PC with an SA44B attached is still to be done.
+- Verified against hardware on one Mac: an SA44B (firmware 2.12) on macOS 27
+  with an M-series CPU. The SA44, SA124A and SA124B follow the same API but
+  have not been tried.
+- The Rosetta install path for macOS 13 to 26 has not been exercised; macOS
+  27 has Rosetta built in.
