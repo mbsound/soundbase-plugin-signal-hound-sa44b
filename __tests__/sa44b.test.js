@@ -102,7 +102,7 @@ test('the manifest is valid and the handshake reports a real port', () => {
   assert.equal(handle.manifest.id, manifest.id);
   assert.ok(handle.port > 0);
   assert.equal(HANDSHAKE_PREFIX, 'SB_PLUGIN_READY ');
-  assert.deepEqual(manifest.platforms, ['darwin-arm64', 'win32-x64']);
+  assert.deepEqual(manifest.platforms, ['darwin-arm64']);
 });
 
 test('the product the adapter announces is declared in the manifest', () => {

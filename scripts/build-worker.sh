@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
-# Build driver/worker/sa44b-worker.c for every target we can reach from here.
+# Build driver/worker/sa44b-worker.c for this machine.
 #
-#   scripts/build-worker.sh            # host build + win32-x64 if mingw-w64 is installed
-#   scripts/build-worker.sh --host     # host build only
+#   scripts/build-worker.sh
 #
-# Outputs land in driver/worker/bin/<platform>-<arch>/, which is what
-# driver/worker-client.js looks for. The Windows build is the one that talks to
-# real hardware (Signal Hound ships sa_api.dll for Windows only); the host build
-# is for running the plugin in mock mode on a development machine.
+# The output lands in driver/worker/bin/<platform>-<arch>/, which is what
+# driver/worker-client.js looks for. This host build is for mock mode (the
+# tests and `npm run smoke`); the worker that talks to the real SA44B is the
+# x86-64 Linux build in the guest payload (scripts/build-x86.sh).
 #
-# Prerequisites: a C compiler for the host (clang on macOS, gcc on Linux) and,
-# for the Windows target, mingw-w64 (`brew install mingw-w64` on macOS,
-# `apt install gcc-mingw-w64-x86-64` on Debian/Ubuntu).
+# Prerequisite: a C compiler (clang on macOS, gcc on Linux).
 
 set -euo pipefail
 
@@ -43,21 +40,4 @@ build_host() {
   cc $CFLAGS -o "$OUT/$target/sa44b-worker" "$SRC" -lm
 }
 
-build_win32_x64() {
-  local cc=x86_64-w64-mingw32-gcc
-  if ! command -v "$cc" >/dev/null 2>&1; then
-    echo "[build-worker] win32-x64 skipped: $cc not found (brew install mingw-w64)"
-    return 0
-  fi
-  mkdir -p "$OUT/win32-x64"
-  echo "[build-worker] win32-x64"
-  # static libgcc so the exe has no mingw runtime dependency on the user's PC
-  "$cc" $CFLAGS -static -o "$OUT/win32-x64/sa44b-worker.exe" "$SRC" -lm
-}
-
 build_host
-if [[ "${1:-}" != "--host" ]]; then
-  build_win32_x64
-fi
-echo "[build-worker] done"
-ls -la "$OUT"/*/

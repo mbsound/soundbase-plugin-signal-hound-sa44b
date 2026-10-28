@@ -1,9 +1,10 @@
 // Signal Hound SA44B (and the rest of the SA series) as a SoundBase spectrum
 // analyzer.
 //
-// The vendor library (sa_api.dll) is Windows-only and blocking, so all of it
-// lives behind a child process — driver/worker/ — that this adapter talks to
-// through driver/worker-client.js. This file holds the device logic: what the
+// The vendor library is Signal Hound's x86-64 Linux libsa_api.so, which runs
+// inside a small Linux guest on Apple Silicon (driver/mac-host.js). It is
+// blocking, so all of it lives behind a worker process — driver/worker/ —
+// that this adapter talks to through driver/worker-client.js. This file holds the device logic: what the
 // hardware can do, how a requested configuration is clamped to it, and the
 // sweep loop. Nothing here touches the SA API directly.
 //
@@ -109,7 +110,7 @@ export async function discoverDevices(pluginConfig = {}) {
     try {
       const serials = viaMacHost()
         ? await macHost.listSerials()
-        : await listSerials({ mock: mockRequested(), sdkDir: sdkDirOf(pluginConfig) });
+        : await listSerials({ mock: mockRequested() });
       devices = serials.map((serial) => ({
         id: `${ID_PREFIX}${serial}`,
         name: `Signal Hound SA (SN ${serial})`,
@@ -117,7 +118,7 @@ export async function discoverDevices(pluginConfig = {}) {
         transport: { kind: 'usb', serial },
       }));
     } catch {
-      // No worker for this platform, no sa_api.dll, or nothing attached: a
+      // No worker for this platform, no runtime, or nothing attached: a
       // normal, empty result. open() reports the specific reason when a user
       // actually asks for a device.
     }
@@ -129,10 +130,6 @@ export async function discoverDevices(pluginConfig = {}) {
   return discoveryInFlight;
 }
 
-function sdkDirOf(pluginConfig) {
-  const v = pluginConfig?.sdkPath;
-  return typeof v === 'string' && v.trim() ? v.trim() : undefined;
-}
 
 /** Serial from `device.config.serial` (added by hand) or from the id. */
 function serialOf(device) {
@@ -158,8 +155,6 @@ class SignalHoundAdapter {
   constructor(device, pluginConfig = {}) {
     this.device = device;
     this.serial = serialOf(device);
-    // sdkPath names a Windows folder; inside the VM the library has a fixed place
-    this.sdkDir = viaMacHost() ? undefined : sdkDirOf(pluginConfig);
     this.worker = null;
     this.type = UNKNOWN_TYPE;
     this.identity = null;
@@ -187,7 +182,6 @@ class SignalHoundAdapter {
     }
     const worker = new WorkerClient({
       mock: mockRequested(),
-      sdkDir: this.sdkDir,
       socketPath,
       log: (line) => this.log(line),
     });
@@ -603,15 +597,15 @@ function describeOpenFailure(err, serial) {
   switch (err?.code) {
     case 'no_worker_binary':
       return (
-        `Signal Hound's SA API is available for Windows only, and this plugin has no ` +
-        `worker for ${process.platform}-${process.arch}. ${err.message}`
+        `This plugin runs on Apple Silicon Macs only and has no worker for ` +
+        `${process.platform}-${process.arch}. ${err.message}`
       );
     case 'library_unavailable':
       return `Cannot load the Signal Hound SA API: ${err.message}`;
     case 'worker_timeout':
       return (
-        `Opening ${which} timed out. The first open of a unit on a PC downloads its ` +
-        `calibration file and needs internet access; check the USB cable and that Spike is not using the device.`
+        `Opening ${which} timed out. Check the USB cable, and that no other program ` +
+        `(another SoundBase, or a VM with the unit passed through) is holding the device.`
       );
     default:
       return `Could not open ${which}: ${err?.message ?? err}`;

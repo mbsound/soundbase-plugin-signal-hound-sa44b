@@ -5,8 +5,7 @@
   "version": "0.1.0",
   "license": "BUSL-1.1",
   "platforms": [
-    "darwin-arm64",
-    "win32-x64"
+    "darwin-arm64"
   ],
   "repository": "https://github.com/mbsound/soundbase-plugin-signal-hound-sa44b",
   "maintainers": [
@@ -65,13 +64,6 @@
       "help": "The unit's serial number, as printed on the label. Leave empty to open the first SA44B found."
     }
   ],
-  "pluginConfigFields": [
-    {
-      "id": "sdkPath",
-      "type": "textinput",
-      "label": "SA API folder",
-      "help": "Folder containing sa_api.dll and ftd2xx.dll. Leave empty to use the copies installed with Spike (C:\\Program Files\\Signal Hound\\Spike)."
-    }
-  ],
+  "pluginConfigFields": [],
   "stateKeys": []
 }

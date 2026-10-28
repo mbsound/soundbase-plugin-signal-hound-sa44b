@@ -9,9 +9,8 @@ __pycache__/
 *.pyc
 
 # host builds of the worker are for local mock runs; scripts/build-worker.sh
-# makes them. The Windows build is committed because it is the one that ships.
-driver/worker/bin/darwin-*/
-driver/worker/bin/linux-*/
+# makes them. The worker that ships is in driver/microvm/guest/x86/.
+driver/worker/bin/
 
 # Signal Hound's Linux SA API, fetched by the plugin on first open (older
 # checkouts kept a copy here)

@@ -60,14 +60,11 @@ jobs:
         run: |
           if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
-      # The worker that owns sa_api.dll: a Linux build for the tests on this
-      # runner, and the Windows build that ships in the zip.
-      - name: Build the SA API worker
+      # A host build of the worker, for the tests and the smoke check in mock
+      # mode. What ships is the committed macOS runtime under driver/.
+      - name: Build the worker for mock mode
         shell: bash
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-mingw-w64-x86-64
-          bash scripts/build-worker.sh
+        run: bash scripts/build-worker.sh
 
       # A manual run that asked for a release: move the version and make the
       # release commit and tag here, locally. They are pushed only after every
@@ -143,6 +140,13 @@ jobs:
           name: plugin-zip
           path: dist/*.zip
 
+      # The complete corresponding source of the GPL/LGPL parts of the macOS
+      # runtime (THIRD-PARTY-NOTICES.md), published next to the zip. A .tar,
+      # not a .zip, so nothing mistakes it for the plugin.
+      - name: Collect corresponding sources
+        if: github.ref_type == 'tag' || steps.bump.outputs.tag != ''
+        run: bash scripts/fetch-sources.sh dist
+
       # A dispatch run with bump=none stops here on purpose, and that is easy to
       # mistake for a failure when the Release list stays empty. Say so where
       # the run summary is read, with what does publish.
@@ -192,7 +196,7 @@ jobs:
             echo "::notice::$TAG already has a Release — leaving it alone"
             exit 0
           fi
-          gh release create "$TAG" dist/*.zip \
+          gh release create "$TAG" dist/*.zip dist/*-sources.tar \
             --verify-tag \
             --title "$TAG" \
             --generate-notes

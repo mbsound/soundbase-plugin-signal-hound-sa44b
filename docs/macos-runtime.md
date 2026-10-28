@@ -95,24 +95,34 @@ match and record what went in.
 ## Signing
 
 Virtualization.framework refuses to create a VM unless the calling binary
-carries the `com.apple.security.virtualization` entitlement. Unlike the
-networking entitlement, it needs no provisioning profile, so:
+carries the `com.apple.security.virtualization` entitlement. That entitlement
+is not restricted: it needs no provisioning profile and no Apple Developer
+account, and it works under an ad-hoc signature. `scripts/build-launcher.sh`
+signs ad hoc (`codesign -s -`) with the entitlement, and `scripts/build-bridge.sh`
+signs the bridge ad hoc. Those are the binaries that ship.
 
-- **Local builds**: `scripts/build-launcher.sh` signs ad hoc (`codesign -s -`)
-  with the entitlement, which is enough to run on the machine that built it,
-  and on any Apple Silicon Mac that gets the file without a quarantine flag.
-- **Distribution**: a zip downloaded through a browser carries quarantine,
-  and Gatekeeper will not run an ad-hoc-signed executable from it. The
-  release build must sign `sa44b-vm` and `ftdi-bridge` with a **Developer
-  ID Application** certificate (hardened runtime on, the entitlement kept:
-  `SB_CODESIGN_IDENTITY="Developer ID Application: …" scripts/build-launcher.sh`,
-  and the same identity on the bridge) and notarize them with the rest of
-  the plugin. The x86-64 Linux files and the kernel are data to macOS and
-  need no signature.
+What decides whether ad hoc is enough is the quarantine flag. macOS refuses
+to run an ad-hoc-signed executable from a file marked as downloaded from the
+internet, and asks for a Developer ID signature instead.
 
-The Lab's installer extracts the zip itself; whether the extracted files
-carry quarantine depends on how the zip reached the machine. Signing with
-Developer ID removes the question.
+- **Lab installs**: SoundBase Desktop downloads and unpacks the plugin
+  itself, and the files it writes are not quarantined. Every plugin
+  installed that way on the test Mac had no quarantined file, and other Lab
+  plugins already ship ad-hoc-signed native libraries. Ad hoc is enough.
+- **Manual installs from a browser download**: the zip, and anything
+  unpacked from it with Finder, is quarantined, and the launcher and bridge
+  will not start. Clear the flag on the plugin folder once:
+
+  ```sh
+  xattr -dr com.apple.quarantine "/path/to/signal-hound-sa44b"
+  ```
+
+- **If that ever changes**, sign both binaries with a Developer ID
+  Application certificate, hardened runtime on, keeping the entitlement
+  (`SB_CODESIGN_IDENTITY="Developer ID Application: …" scripts/build-launcher.sh`),
+  and notarize them. That needs the paid Apple Developer Program; a free
+  Apple ID cannot issue Developer ID certificates or notarize. The x86-64
+  Linux files and the kernel are data to macOS and never need a signature.
 
 ## When it does not come up
 
@@ -128,6 +138,9 @@ mac-host:` lines; guest console lines are prefixed `guest:`).
   hypervisor) and leftover `limactl hostagent` processes each count. Stop
   one. The same error with no other VM running means the launcher's
   signature lost its entitlement (`codesign -d --entitlements - driver/microvm/bin/sa44b-vm`).
+- **The launcher or bridge is killed on start, or macOS says it "cannot be
+  verified"** — the plugin folder is quarantined (a manual install from a
+  browser download). See *Signing*.
 - **"Rosetta is required … not installed"** — `softwareupdate` failed or
   needs an administrator; run the command it names in Terminal.
 - **`guest: [guest] FATAL: cannot mount the Rosetta share`** — Rosetta is
