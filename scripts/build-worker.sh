@@ -15,7 +15,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/driver/worker/sa44b-worker.c"
 OUT="$ROOT/driver/worker/bin"
-CFLAGS="-O2 -Wall -Wextra -std=c11"
+CFLAGS="-O2 -Wall -Wextra -std=c11 -D_DEFAULT_SOURCE"
 
 host_target() {
   local os arch

@@ -15,7 +15,7 @@
 # which is everything libsa_api.so.3.0.11 links against besides libftd2xx.so
 # (the shim). No apt, no package manager, nothing else in the guest.
 #
-# Prerequisites: curl, tar (bsdtar or GNU), xz; and docker or Lima.
+# Prerequisites: curl, ar, tar, xz; and docker or Lima.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -88,8 +88,9 @@ echo "$DEBS" | while read -r name path sha; do
   echo "$sha  $deb" | shasum -a 256 -c - >/dev/null || { echo "[build-x86] checksum mismatch for $deb" >&2; exit 1; }
   x="$BUILD/debs/$name"
   rm -rf "$x" && mkdir -p "$x"
-  # a .deb is an ar archive; bsdtar and GNU tar (via ar) both unpack it
-  (cd "$x" && tar -xf "$deb" && tar -xf data.tar.xz)
+  # a .deb is an ar archive: ar unpacks it on macOS and Linux alike (GNU tar
+  # cannot), then its data member is an ordinary tarball
+  (cd "$x" && ar x "$deb" && tar -xf data.tar.xz)
 done
 # libc6 keeps its libraries in lib/, libstdc++6 in usr/lib/; the guest sees a flat lib/
 cp "$BUILD/debs/libc6/lib/x86_64-linux-gnu/"{libc.so.6,libm.so.6,libdl.so.2,libpthread.so.0,librt.so.1} "$OUT/lib/"
