@@ -7,7 +7,7 @@
 #
 # Produces <out-dir>/signal-hound-sa44b-<version>-sources.tar with a
 # SHA256SUMS file inside. The archive is several hundred MB, mostly the
-# kernel and gcc-12 sources. Prerequisites: curl, tar, shasum.
+# kernel and gcc-12 sources. Prerequisites: curl, git, tar, shasum.
 #
 # The pins here must match scripts/build-guest.sh, scripts/build-x86.sh and
 # scripts/build-bridge.sh; bump them together.
@@ -25,8 +25,25 @@ get() { # url dest
   echo "[fetch-sources] $1"
   curl -fsSL --retry 3 -o "$WORK/$2" "$1"
 }
+# one aports directory at one commit: a shallow, sparse, blob-less fetch, from
+# Alpine's own git server or its GitHub mirror (same commits)
 aports() { # commit path dest
-  get "https://gitlab.alpinelinux.org/alpine/aports/-/archive/$1/aports-$1.tar.gz?path=$2" "$3"
+  local repo="$ROOT/build/sources/aports-$1"
+  rm -rf "$repo"
+  for url in https://git.alpinelinux.org/aports https://github.com/alpinelinux/aports.git; do
+    echo "[fetch-sources] aports $2 @ $1 from $url"
+    if git init -q "$repo" &&
+      git -C "$repo" fetch -q --depth 1 --filter=blob:none "$url" "$1" &&
+      git -C "$repo" sparse-checkout set --no-cone "/$2/" &&
+      git -C "$repo" checkout -q FETCH_HEAD; then
+      tar -czf "$WORK/$3" -C "$repo" "$2"
+      rm -rf "$repo"
+      return 0
+    fi
+    rm -rf "$repo"
+  done
+  echo "[fetch-sources] ERROR: cannot fetch aports $2 at $1" >&2
+  exit 1
 }
 
 # Linux 6.12.114 as Alpine builds linux-virt
@@ -40,7 +57,7 @@ get https://busybox.net/downloads/busybox-1.37.0.tar.bz2 busybox-1.37.0.tar.bz2
 # Debian source packages: the .dsc names every file that makes up the source
 debsrc() { # pool-dir dsc
   get "$DEB/$1/$2" "$2"
-  awk '/^Files:/{f=1;next} /^[^ ]/{f=0} f{print $3}' "$WORK/$2" | while read -r file; do
+  awk '/^Files:/{f=1;next} !/^ /{f=0} f && NF==3{print $3}' "$WORK/$2" | while read -r file; do
     get "$DEB/$1/$file" "$file"
   done
 }
