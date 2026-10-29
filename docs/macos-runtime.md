@@ -69,7 +69,10 @@ match and record what went in.
   libusb static with its own `configure`, compiles libftdi's single C file
   directly (its CMake step only generates a version header), links the bridge
   against both plus IOKit/CoreFoundation/Security, and fails if `otool -L`
-  shows anything outside `/usr/lib` and `/System`.
+  shows anything outside `/usr/lib` and `/System`, or if the bridge
+  weak-imports any symbol (one newer than the macOS 13 deployment target,
+  which would be null on older systems). libusb is configured without
+  `pipe2`, which the macOS 27 SDK declares but macOS 13–26 lack.
 - **Launcher** (`scripts/build-launcher.sh`): `swiftc` against
   Virtualization.framework, deployment target macOS 13, then `codesign` with
   `driver/microvm/sa44b-vm.entitlements`. See *Signing* below.
@@ -149,6 +152,11 @@ mac-host:` lines; guest console lines are prefixed `guest:`).
   not register; the console line before it says why. The registration line
   uses `\xHH` escapes that the kernel decodes itself (raw bytes are cut at
   the first NUL).
+- **`ftdi-bridge exited (SIGSEGV)`** on every start, before the
+  `FTDI port(s) visible` line — a bridge built with a newer SDK than the
+  running macOS, calling a symbol the system does not have (0.1.0 called
+  `pipe2` and crashed on macOS 26 and older). `nm -m` on the bridge lists
+  any `weak external`; rebuild with `scripts/build-bridge.sh`.
 - **`[launcher] guest vsock port 7788: cannot reach 127.0.0.1:7788`** — the
   bridge died; the next open restarts it.
 - **Worker answers but `list` is empty** — the bridge does not see the unit:
