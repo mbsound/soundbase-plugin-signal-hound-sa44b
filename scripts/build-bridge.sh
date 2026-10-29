@@ -48,13 +48,19 @@ fetch "$LIBFTDI_URL" "$LIBFTDI_SHA256" "$BUILD/libftdi1-$LIBFTDI_VERSION.tar.bz2
 export MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
 CFLAGS="-O2 -mmacosx-version-min=$MIN_MACOS"
 
-# libusb: static only, no udev on macOS
-if [ ! -f "$BUILD/libusb-$LIBUSB_VERSION/libusb/.libs/libusb-1.0.a" ]; then
+# libusb: static only, no udev on macOS. The macOS 27 SDK declares pipe2() as
+# available from macOS 27 only; configure's link test still finds it (as a weak
+# import), and libusb then calls it unchecked, so on macOS 13-26 libusb_init
+# jumps to a null pointer. Tell configure there is no pipe2: libusb falls back
+# to pipe() + FD_CLOEXEC, which every macOS has. A cached build from before
+# this fix still has HAVE_PIPE2 and is rebuilt.
+if [ ! -f "$BUILD/libusb-$LIBUSB_VERSION/libusb/.libs/libusb-1.0.a" ] ||
+  grep -q "define HAVE_PIPE2 1" "$BUILD/libusb-$LIBUSB_VERSION/config.h"; then
   echo "[build-bridge] building libusb $LIBUSB_VERSION (static)"
   rm -rf "$BUILD/libusb-$LIBUSB_VERSION"
   tar -xjf "$BUILD/libusb-$LIBUSB_VERSION.tar.bz2" -C "$BUILD"
   (cd "$BUILD/libusb-$LIBUSB_VERSION" &&
-    ./configure --disable-shared --enable-static --disable-udev --quiet CFLAGS="$CFLAGS" >/dev/null &&
+    ./configure --disable-shared --enable-static --disable-udev --quiet CFLAGS="$CFLAGS" ac_cv_func_pipe2=no >/dev/null &&
     make -s -j"$(sysctl -n hw.ncpu)" >/dev/null)
 fi
 
@@ -86,6 +92,13 @@ codesign --force --sign - "$OUT/ftdi-bridge" 2>/dev/null || true
 if otool -L "$OUT/ftdi-bridge" | grep -q -E "homebrew|/usr/local|/opt/"; then
   echo "[build-bridge] ERROR: the bridge still links a non-system library:" >&2
   otool -L "$OUT/ftdi-bridge" >&2
+  exit 1
+fi
+# a weak import is a symbol newer than MIN_MACOS that the binary calls without
+# an availability check; it is null on older systems (SIGSEGV, as pipe2 was)
+if nm -m "$OUT/ftdi-bridge" | grep -q "weak external"; then
+  echo "[build-bridge] ERROR: the bridge weak-imports symbols newer than macOS $MIN_MACOS:" >&2
+  nm -m "$OUT/ftdi-bridge" | grep "weak external" >&2
   exit 1
 fi
 ls -la "$OUT/ftdi-bridge"
